@@ -468,8 +468,8 @@ function WorkflowManagementView({
             <p className="muted">{selectedWorkflow.name}</p>
           </div>
           <div className="actions">
-            <button onClick={onViewWorkflowList} disabled={busy}>返回工作流列表</button>
-            <button onClick={() => onStartWorkflow(selectedWorkflow.name)} disabled={busy}>启动运行</button>
+            <button className="secondary-button" onClick={onViewWorkflowList} disabled={busy}>返回工作流列表</button>
+            <button className="primary-button" onClick={() => onStartWorkflow(selectedWorkflow.name)} disabled={busy}>启动运行</button>
             <button className="danger-button" onClick={() => onDeleteWorkflow(selectedWorkflow.name)} disabled={busy}>删除定义</button>
             <span className="status">{selectedWorkflow.mode}</span>
           </div>
@@ -506,7 +506,7 @@ function WorkflowManagementView({
           </div>
           <div className="actions">
             <span className="count-pill">{filteredWorkflows.length} 个</span>
-            <button onClick={onOpenCreateWorkflow} disabled={busy}>新增工作流</button>
+            <button className="primary-button" onClick={onOpenCreateWorkflow} disabled={busy}>新增工作流</button>
           </div>
         </div>
         <input value={workflowSearch} onChange={(event) => onSetWorkflowSearch(event.target.value)} placeholder="按名称、展示名、描述或模式查询 workflow" />
@@ -526,7 +526,7 @@ function WorkflowManagementView({
               </div>
               <div className="workflow-row-actions">
                 <button onClick={() => onSelectWorkflow(workflow.name)} disabled={busy}>查看详情</button>
-                <button onClick={() => onStartWorkflow(workflow.name)} disabled={busy}>启动运行</button>
+                <button className="primary-button" onClick={() => onStartWorkflow(workflow.name)} disabled={busy}>启动运行</button>
                 <button className="danger-button" onClick={() => onDeleteWorkflow(workflow.name)} disabled={busy}>删除定义</button>
               </div>
             </article>
@@ -542,7 +542,7 @@ function WorkflowManagementView({
                 <p className="eyebrow">Workflow Builder</p>
                 <h2 id="create-workflow-title">新增工作流</h2>
               </div>
-              <button onClick={onCloseCreateWorkflow} disabled={busy}>关闭</button>
+              <button className="secondary-button" onClick={onCloseCreateWorkflow} disabled={busy}>关闭</button>
             </div>
 
             <div className="modal-body">
@@ -612,8 +612,8 @@ function WorkflowManagementView({
             </div>
 
             <div className="modal-footer">
-              <button onClick={onCloseCreateWorkflow} disabled={busy}>取消</button>
-              <button onClick={onCreateWorkflow} disabled={busy || !draft.name || draft.nodes.length === 0}>保存 workflow</button>
+              <button className="secondary-button" onClick={onCloseCreateWorkflow} disabled={busy}>取消</button>
+              <button className="primary-button" onClick={onCreateWorkflow} disabled={busy || !draft.name || draft.nodes.length === 0}>保存 workflow</button>
             </div>
           </section>
         </div>
@@ -694,11 +694,11 @@ function RunConsoleView({ busy, runs, selectedRun, onConfirmNode, onDeleteRun, o
             <p className="muted">{selectedRun.id}</p>
           </div>
           <div className="actions">
-            <button onClick={onViewRunList} disabled={busy}>返回运行记录</button>
+            <button className="secondary-button" onClick={onViewRunList} disabled={busy}>返回运行记录</button>
             <button onClick={() => onViewWorkflow(selectedRun.workflowName)} disabled={busy}>工作流定义</button>
             <span className={`status ${selectedRun.status}`}>{statusLabel(selectedRun.status)}</span>
-            <button onClick={onStopRun} disabled={busy || selectedRun.status === "stopped"}>停止</button>
-            <button onClick={onDeleteRun} disabled={busy}>删除</button>
+            <button className="danger-button" onClick={onStopRun} disabled={busy || selectedRun.status === "stopped"}>停止</button>
+            <button className="danger-button" onClick={onDeleteRun} disabled={busy}>删除</button>
           </div>
         </div>
 
@@ -740,7 +740,7 @@ function RunConsoleView({ busy, runs, selectedRun, onConfirmNode, onDeleteRun, o
                   <div className="node-actions">
                     <span className={`status ${selectedStatus?.status ?? "pending"}`}>{statusLabel(selectedStatus?.status ?? "pending")}</span>
                     {selectedStatus?.status === "waiting-confirmation" && (
-                      <button onClick={() => onConfirmNode(selectedWorkflowNode.id)} disabled={busy}>确认继续</button>
+                      <button className="primary-button" onClick={() => onConfirmNode(selectedWorkflowNode.id)} disabled={busy}>确认继续</button>
                     )}
                   </div>
                 </div>
