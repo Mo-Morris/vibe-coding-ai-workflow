@@ -175,6 +175,15 @@ def find_workflow_node(run: dict[str, Any], node_id: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail=f"Node run not found: {node_id}")
 
 
+def node_has_ui(node_name: str) -> bool:
+    node_dir, node_def = node_definition(node_name)
+    entry = node_def.get("ui", {}).get("entry")
+    if not entry:
+        return False
+    entry_path = (node_dir / entry).resolve()
+    return (node_dir in entry_path.parents or entry_path == node_dir) and entry_path.exists()
+
+
 def next_node_id(run: dict[str, Any], node_id: str) -> str | None:
     nodes = workflow_nodes(run)
     for index, node in enumerate(nodes):
@@ -436,7 +445,15 @@ def list_runs() -> dict[str, Any]:
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     run = load_run(run_id)
-    statuses = {node["id"]: load_node_status(run_id, node["id"]) for node in workflow_nodes(run)}
+    statuses = {}
+    for node in workflow_nodes(run):
+        status = load_node_status(run_id, node["id"])
+        has_ui = node_has_ui(node["node"])
+        statuses[node["id"]] = {
+            **status,
+            "hasUi": has_ui,
+            "uiUrl": f"/ui/runs/{run_id}/nodes/{node['id']}/" if has_ui else None,
+        }
     return {**run, "nodeStatuses": statuses}
 
 
@@ -462,6 +479,21 @@ def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
         "mode": run.get("mode"),
         "status": status.get("status"),
         "resultUrl": f"/api/runs/{run_id}/nodes/{node_id}/result",
+    }
+
+
+@app.get("/api/runs/{run_id}/nodes/{node_id}/logs")
+def get_node_logs(run_id: str, node_id: str) -> dict[str, Any]:
+    find_workflow_node(load_run(run_id), node_id)
+    logs_dir = node_run_dir(run_id, node_id) / "logs"
+    stdout_path = logs_dir / "stdout.log"
+    stderr_path = logs_dir / "stderr.log"
+    stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+    stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "combined": "\n".join(part for part in [stdout.strip(), stderr.strip()] if part),
     }
 
 

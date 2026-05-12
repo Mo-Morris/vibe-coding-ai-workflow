@@ -37,6 +37,8 @@ type NodeStatus = {
   endedAt?: string | null;
   error?: string | null;
   progress?: number;
+  hasUi?: boolean;
+  uiUrl?: string | null;
 };
 
 type Run = {
@@ -58,6 +60,12 @@ type WorkflowDraft = {
   description: string;
   mode: WorkflowMode;
   nodes: WorkflowNode[];
+};
+
+type NodeLogs = {
+  stdout: string;
+  stderr: string;
+  combined: string;
 };
 
 const emptyDraft: WorkflowDraft = {
@@ -627,7 +635,56 @@ type RunConsoleProps = {
 };
 
 function RunConsoleView({ busy, runs, selectedRun, onConfirmNode, onDeleteRun, onStopRun, onViewRunList, onViewRun, onViewWorkflow }: RunConsoleProps) {
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [selectedNodeLogs, setSelectedNodeLogs] = useState<NodeLogs>({ stdout: "", stderr: "", combined: "" });
+  const [logError, setLogError] = useState("");
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setSelectedNodeId("");
+      return;
+    }
+    const currentNodeId = selectedRun.currentNodeId ?? selectedRun.workflow.nodes[0]?.id ?? "";
+    const stillExists = selectedRun.workflow.nodes.some((node) => node.id === selectedNodeId);
+    if (!selectedNodeId || !stillExists) {
+      setSelectedNodeId(currentNodeId);
+    }
+  }, [selectedNodeId, selectedRun]);
+
+  useEffect(() => {
+    if (!selectedRun || !selectedNodeId) {
+      setSelectedNodeLogs({ stdout: "", stderr: "", combined: "" });
+      return;
+    }
+
+    let cancelled = false;
+    async function loadLogs() {
+      try {
+        const logs = await api<NodeLogs>(`/api/runs/${selectedRun!.id}/nodes/${selectedNodeId}/logs`);
+        if (!cancelled) {
+          setSelectedNodeLogs(logs);
+          setLogError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setLogError(err instanceof Error ? err.message : "日志读取失败");
+        }
+      }
+    }
+
+    void loadLogs();
+    const timer = window.setInterval(loadLogs, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedNodeId, selectedRun]);
+
   if (selectedRun) {
+    const selectedWorkflowNode = selectedRun.workflow.nodes.find((node) => node.id === selectedNodeId) ?? selectedRun.workflow.nodes[0];
+    const selectedStatus = selectedWorkflowNode ? selectedRun.nodeStatuses?.[selectedWorkflowNode.id] : undefined;
+    const selectedLogText = selectedNodeLogs.combined || "暂无运行日志。";
+
     return (
       <section className="run-detail-page">
         <div className="section-header">
@@ -651,29 +708,61 @@ function RunConsoleView({ busy, runs, selectedRun, onConfirmNode, onDeleteRun, o
           {selectedRun.endedAt && <span>结束：{selectedRun.endedAt}</span>}
         </div>
 
-        <div className="node-list">
-          {selectedRun.workflow.nodes.map((node, index) => {
-            const status = selectedRun.nodeStatuses?.[node.id];
-            return (
-              <article className="node-card" key={node.id}>
-                <div className="node-index">{index + 1}</div>
-                <div className="node-body">
-                  <div className="node-title-row">
-                    <h3>{node.id}</h3>
-                    <span className={`status ${status?.status ?? "pending"}`}>{statusLabel(status?.status ?? "pending")}</span>
+        <div className="run-workspace">
+          <aside className="run-node-rail" aria-label="运行节点">
+            {selectedRun.workflow.nodes.map((node, index) => {
+              const status = selectedRun.nodeStatuses?.[node.id];
+              return (
+                <button
+                  className={`run-step ${selectedNodeId === node.id ? "active" : ""}`}
+                  key={node.id}
+                  onClick={() => setSelectedNodeId(node.id)}
+                  disabled={busy}
+                >
+                  <span>
+                    Step {index + 1} {node.id}
+                    <em>{statusLabel(status?.status ?? "pending")}</em>
+                  </span>
+                  <small>{node.node}</small>
+                </button>
+              );
+            })}
+          </aside>
+
+          <section className="run-node-panel">
+            {selectedWorkflowNode && (
+              <>
+                <div className="node-panel-header">
+                  <div>
+                    <h3>{selectedWorkflowNode.id}</h3>
+                    <p className="muted">{selectedWorkflowNode.node}</p>
                   </div>
-                  <p className="muted">{node.node}</p>
-                  {status?.error && <p className="error-text">{status.error}</p>}
                   <div className="node-actions">
-                    <a href={`${API_BASE}/ui/runs/${selectedRun.id}/nodes/${node.id}/`} target="_blank" rel="noreferrer">打开节点 UI</a>
-                    {status?.status === "waiting-confirmation" && (
-                      <button onClick={() => onConfirmNode(node.id)} disabled={busy}>确认继续</button>
+                    <span className={`status ${selectedStatus?.status ?? "pending"}`}>{statusLabel(selectedStatus?.status ?? "pending")}</span>
+                    {selectedStatus?.status === "waiting-confirmation" && (
+                      <button onClick={() => onConfirmNode(selectedWorkflowNode.id)} disabled={busy}>确认继续</button>
                     )}
                   </div>
                 </div>
-              </article>
-            );
-          })}
+
+                {selectedStatus?.error && <p className="error-text">{selectedStatus.error}</p>}
+
+                {selectedStatus?.hasUi ? (
+                  <iframe
+                    className="node-ui-frame"
+                    title={`${selectedWorkflowNode.id} UI`}
+                    src={`${API_BASE}${selectedStatus.uiUrl}`}
+                  />
+                ) : (
+                  <div className="node-console-wrap">
+                    <div className="console-title">运行日志</div>
+                    {logError && <p className="error-text">{logError}</p>}
+                    <pre className="node-console">{selectedLogText}</pre>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
         </div>
       </section>
     );

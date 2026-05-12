@@ -496,6 +496,132 @@ label {
   gap: 14px;
 }
 
+.run-workspace {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 620px;
+  background: #ffffff;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.run-node-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #f3f6f8;
+  border-right: 1px solid #d8e0e8;
+  padding: 10px;
+}
+
+.run-step {
+  width: 100%;
+  min-height: 56px;
+  display: grid;
+  gap: 5px;
+  align-content: center;
+  border-color: #d9e0e7;
+  background: #edf0f3;
+  color: #8a96a3;
+  text-align: left;
+}
+
+.run-step.active {
+  border-color: #2c6bed;
+  background: #eef4ff;
+  color: #17202a;
+  box-shadow: 0 0 0 1px rgb(44 107 237 / 15%);
+}
+
+.run-step span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 800;
+}
+
+.run-step em {
+  flex: 0 0 auto;
+  border: 1px solid #d4dce5;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #556474;
+  padding: 2px 7px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.run-step small {
+  color: #657484;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.run-node-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 16px;
+}
+
+.node-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.node-panel-header h3,
+.node-panel-header p {
+  margin: 0;
+}
+
+.node-panel-header p {
+  margin-top: 4px;
+}
+
+.node-ui-frame {
+  width: 100%;
+  min-height: 540px;
+  height: calc(100vh - 280px);
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.node-console-wrap {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+}
+
+.console-title {
+  color: #314150;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.node-console {
+  min-height: 540px;
+  height: calc(100vh - 310px);
+  margin: 0;
+  overflow: auto;
+  border-radius: 8px;
+  background: #101827;
+  color: #f7fbff;
+  padding: 14px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .node-card {
   display: grid;
   grid-template-columns: 44px 1fr;
@@ -568,10 +694,21 @@ label {
   .builder-grid,
   .definition-node,
   .draft-node,
+  .run-workspace,
   .run-row,
   .run-row-main,
   .workflow-row {
     grid-template-columns: 1fr;
+  }
+
+  .run-node-rail {
+    border-right: 0;
+    border-bottom: 1px solid #d8e0e8;
+  }
+
+  .node-ui-frame,
+  .node-console {
+    height: 520px;
   }
 
   .modal-backdrop {
