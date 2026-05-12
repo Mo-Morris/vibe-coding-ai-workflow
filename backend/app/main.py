@@ -8,6 +8,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from re import fullmatch
 from typing import Any
 
 import yaml
@@ -40,6 +41,20 @@ process_lock = threading.Lock()
 
 class RunWorkflowRequest(BaseModel):
     input: dict[str, Any] = {}
+
+
+class WorkflowNodeRequest(BaseModel):
+    id: str
+    node: str
+    depends_on: list[str] = []
+
+
+class CreateWorkflowRequest(BaseModel):
+    name: str
+    label: str = ""
+    description: str = ""
+    mode: str = "manual-confirm"
+    nodes: list[WorkflowNodeRequest]
 
 
 class ConfirmRequest(BaseModel):
@@ -83,6 +98,15 @@ def read_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail=f"Invalid YAML object: {path}")
     return data
+
+
+def validate_slug(value: str, field_name: str) -> str:
+    if not fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must use 1-64 letters, numbers, hyphens, or underscores, and start with a letter or number",
+        )
+    return value
 
 
 def node_definition(node_name: str) -> tuple[Path, dict[str, Any]]:
@@ -303,6 +327,65 @@ def list_workflows() -> dict[str, Any]:
         definition = read_yaml(workflow_file)
         workflows.append({**definition, "path": str(workflow_file)})
     return {"workflows": workflows}
+
+
+@app.post("/api/workflows")
+def create_workflow(request: CreateWorkflowRequest) -> dict[str, Any]:
+    workflow_name = validate_slug(request.name.strip(), "workflow name")
+    if request.mode not in {"auto", "manual-confirm"}:
+        raise HTTPException(status_code=400, detail="mode must be auto or manual-confirm")
+    if not request.nodes:
+        raise HTTPException(status_code=400, detail="workflow must contain at least one node")
+
+    seen_node_ids: set[str] = set()
+    workflow_nodes_payload = []
+    for index, node in enumerate(request.nodes):
+        node_id = validate_slug(node.id.strip(), "node id")
+        if node_id in seen_node_ids:
+            raise HTTPException(status_code=400, detail=f"duplicate node id: {node_id}")
+        seen_node_ids.add(node_id)
+        node_definition(node.node)
+        workflow_nodes_payload.append(
+            {
+                "id": node_id,
+                "node": node.node,
+                "depends_on": node.depends_on if index > 0 else [],
+            }
+        )
+
+    workflow_dir = (WORKFLOWS_DIR / workflow_name).resolve()
+    workflow_file = workflow_dir / "workflow.md"
+    if WORKFLOWS_DIR not in workflow_dir.parents and workflow_dir != WORKFLOWS_DIR:
+        raise HTTPException(status_code=400, detail="Invalid workflow path")
+    if workflow_file.exists():
+        raise HTTPException(status_code=409, detail=f"workflow already exists: {workflow_name}")
+
+    workflow = {
+        "name": workflow_name,
+        "label": request.label.strip() or workflow_name,
+        "description": request.description.strip(),
+        "mode": request.mode,
+        "nodes": workflow_nodes_payload,
+    }
+    workflow_dir.mkdir(parents=True, exist_ok=False)
+    workflow_file.write_text(yaml.safe_dump(workflow, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return {"ok": True, "workflow": {**workflow, "path": str(workflow_file)}}
+
+
+@app.delete("/api/workflows/{workflow_name}")
+def delete_workflow(workflow_name: str) -> JSONResponse:
+    workflow_file, workflow = workflow_definition(workflow_name)
+    workflow_root = workflow_file.parent.resolve()
+    if WORKFLOWS_DIR not in workflow_file.resolve().parents:
+        raise HTTPException(status_code=400, detail="Invalid workflow path")
+
+    workflow_file.unlink()
+    if workflow_file.name == "workflow.md" and workflow_root != WORKFLOWS_DIR:
+        try:
+            workflow_root.rmdir()
+        except OSError:
+            pass
+    return JSONResponse({"ok": True, "workflowName": workflow.get("name", workflow_name)})
 
 
 @app.post("/api/workflows/{workflow_name}/runs")
