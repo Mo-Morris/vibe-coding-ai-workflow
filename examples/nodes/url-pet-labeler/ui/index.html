@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL 猫狗标注</title>
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p>URL Pet Labeler</p>
+        <h1>根据画面标注：小猫 / 小狗</h1>
+        <button id="confirm" type="button">确认继续</button>
+      </header>
+      <p class="hint">
+        若内嵌画面为空白，多为站点禁止 iframe；请用「新窗口打开」查看后再选标注。输出文件为
+        <code>data/labeled_items.json</code>，元素形如 <code>{"url":"…","label":"小猫"}</code>。
+      </p>
+      <section id="summary"></section>
+      <section class="toolbar">
+        <label for="search">搜索 URL / 标注</label>
+        <input id="search" type="search" placeholder="可选" />
+        <button id="searchBtn" type="button">搜索</button>
+        <button id="resetBtn" type="button">显示全部</button>
+      </section>
+      <div id="cards"></div>
+    </main>
+    <script src="assets/main.js"></script>
+  </body>
+</html>

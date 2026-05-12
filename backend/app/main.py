@@ -329,6 +329,14 @@ def list_nodes() -> dict[str, Any]:
     return {"nodes": nodes}
 
 
+@app.get("/api/nodes/{node_name}")
+def get_node_definition(node_name: str) -> dict[str, Any]:
+    node_name = validate_slug(node_name, "node name")
+    node_dir, definition = node_definition(node_name)
+    node_file = node_dir / "node.md"
+    return {**definition, "path": str(node_dir), "definitionPath": str(node_file), "rawDefinition": node_file.read_text(encoding="utf-8")}
+
+
 @app.get("/api/workflows")
 def list_workflows() -> dict[str, Any]:
     workflows = []

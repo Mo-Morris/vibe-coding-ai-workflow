@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CSV 表格编辑</title>
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p>CSV Table Editor</p>
+        <h1>CSV 表格编辑</h1>
+        <button id="confirm" type="button">确认继续</button>
+      </header>
+      <section id="summary"></section>
+      <section class="toolbar">
+        <label for="search">搜索</label>
+        <input id="search" type="search" placeholder="在当前表中搜索…" />
+        <button id="searchBtn" type="button">搜索</button>
+        <button id="resetBtn" type="button">显示全部</button>
+      </section>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </main>
+    <script src="assets/main.js"></script>
+  </body>
+</html>
