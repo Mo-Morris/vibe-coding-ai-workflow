@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -131,6 +131,39 @@ type ConfirmDialogProps = {
   onConfirm: () => void;
   onClose: () => void;
 };
+
+type ToastItem = {
+  id: string;
+  variant: "error" | "success";
+  message: string;
+};
+
+const TOAST_MAX = 6;
+
+function ToastHost({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: (id: string) => void }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-host">
+      {toasts.map((toast) => (
+        <article
+          key={toast.id}
+          className={`toast toast-${toast.variant}`}
+          role="status"
+          aria-live={toast.variant === "error" ? "assertive" : "polite"}
+        >
+          <div className="toast-accent" aria-hidden />
+          <div className="toast-main">
+            <p className="toast-title">{toast.variant === "error" ? "错误" : "提示"}</p>
+            <p className="toast-message">{toast.message}</p>
+          </div>
+          <button type="button" className="toast-close" onClick={() => onDismiss(toast.id)} aria-label="关闭">
+            <span aria-hidden>×</span>
+          </button>
+        </article>
+      ))}
+    </div>
+  );
+}
 
 function ConfirmDialog({
   open,
@@ -272,8 +305,7 @@ function App() {
   const [nodeSearch, setNodeSearch] = useState("");
   const [nodeRegistrySearch, setNodeRegistrySearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
-  const [error, setError] = useState<string>("");
-  const [notice, setNotice] = useState<string>("");
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [runDeleteDialog, setRunDeleteDialog] = useState<{ runId: string; workflowLabel: string } | null>(null);
 
@@ -331,15 +363,22 @@ function App() {
     setSelectedRun(run);
   }
 
+  const pushToast = useCallback((variant: ToastItem["variant"], message: string) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setToasts((prev) => [...prev.slice(-(TOAST_MAX - 1)), { id, variant, message }]);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
   async function withErrorBoundary(action: () => Promise<void>, successMessage = "") {
-    setError("");
-    setNotice("");
     setBusy(true);
     try {
       await action();
-      if (successMessage) setNotice(successMessage);
+      if (successMessage) pushToast("success", successMessage);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      pushToast("error", err instanceof Error ? err.message : "操作失败");
     } finally {
       setBusy(false);
     }
@@ -639,9 +678,6 @@ function App() {
           onConfirm={confirmRunDelete}
         />
 
-        {error && <div className="error">{error}</div>}
-        {notice && <div className="notice">{notice}</div>}
-
         {page === "workflows" && (
           <WorkflowManagementView
             busy={busy}
@@ -700,6 +736,8 @@ function App() {
           />
         )}
       </section>
+
+      <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }
