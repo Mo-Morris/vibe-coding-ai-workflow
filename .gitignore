@@ -1,0 +1,7 @@
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+data/runs/*
+!data/runs/.gitkeep
+__pycache__/
+.DS_Store

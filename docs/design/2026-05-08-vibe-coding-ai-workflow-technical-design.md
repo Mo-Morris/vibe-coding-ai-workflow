@@ -15,6 +15,7 @@
 - 支持节点自定义 UI，但由主程序统一渲染。
 - 支持通过固定 CLI 协议进行节点执行、分页查询、搜索、详情读取和数据清洗写回。
 - 支持保存每次运行的状态、日志、结果索引和确认记录。
+- 支持停止节点、停止工作流运行，并在删除工作流运行前校验所有节点已进入终态。
 
 ## 3. 非目标
 
@@ -148,6 +149,8 @@ runs/
 - `confirmed`：用户已确认，可以进入下一个节点。
 - `failed`：执行失败。
 - `skipped`：被跳过。
+- `stopping`：正在停止，主程序正在终止运行中的节点进程或阻止后续调度。
+- `stopped`：已停止，不会继续自动调度。
 
 自动运行模式：
 
@@ -164,8 +167,33 @@ pending -> running -> success -> waiting-confirmation -> confirmed -> next node 
 失败状态：
 
 ```text
-running -> failed -> retry 或 cancel
+running -> failed -> retry 或 stop
 ```
+
+停止节点：
+
+```text
+running -> stopping -> stopped
+pending -> stopped
+waiting-confirmation -> stopped
+failed/success/confirmed/skipped -> stopped
+```
+
+停止节点时，主程序负责终止当前节点进程、写入 `status.json`，并确保该节点不会被后续自动调度再次执行。对于尚未启动的 `pending` 节点，停止操作直接将其写为 `stopped`。
+
+停止工作流运行时，主程序先将 `run.json` 的整体状态写为 `stopping`，然后停止当前运行节点，并把后续尚未执行的节点标记为 `stopped`。所有节点进入终态后，工作流运行状态写为 `stopped`。
+
+删除工作流运行前必须校验所有节点已进入终态。终态包括：
+
+```text
+success
+confirmed
+failed
+skipped
+stopped
+```
+
+如果存在 `running`、`stopping`、`pending` 或 `waiting-confirmation` 节点，删除请求必须被拒绝，并提示用户先停止节点或停止整个工作流运行。
 
 ## 9. 结果文件约定
 
@@ -341,8 +369,13 @@ PATCH /api/runs/:runId/nodes/:nodeId/records/:dataset/:id
 
 POST /api/runs/:runId/nodes/:nodeId/confirm
 POST /api/runs/:runId/nodes/:nodeId/retry
-POST /api/runs/:runId/cancel
+POST /api/runs/:runId/nodes/:nodeId/stop
+
+POST /api/runs/:runId/stop
+DELETE /api/runs/:runId
 ```
+
+停止接口要求主程序以幂等方式处理：重复停止已停止节点或已停止工作流时返回成功，并保持现有终态不变。删除接口只删除本次工作流运行目录，不删除原始 `workflow.md` 定义文件和节点源码目录。
 
 主程序转换关系：
 
@@ -410,4 +443,7 @@ GET /api/runs/:runId/nodes/:nodeId/context
 - 主程序可以渲染节点目录里的 HTML/CSS/JS。
 - 节点 UI 可以通过主程序 API 查询数据、搜索数据、读取详情和写回清洗结果。
 - `result.json` 只作为轻量元数据和数据集索引，不承载大体量业务数据。
-
+- 可以停止正在运行、等待确认或尚未执行的节点。
+- 可以停止整个工作流运行，停止后不会继续调度后续节点。
+- 删除工作流运行前必须校验所有节点处于终态；如果存在运行中、停止中、等待确认或尚未执行的节点，拒绝删除并提示先停止。
+- 停止和删除操作会写入状态文件，便于 UI 展示和后续审计。

@@ -88,4 +88,53 @@ MVP 先支持线性执行，文件结构预留 `depends_on`，以后可以扩展
 
 完整技术设计见：
 
-[docs/superpowers/specs/2026-05-08-vibe-coding-ai-workflow-technical-design.md](docs/superpowers/specs/2026-05-08-vibe-coding-ai-workflow-technical-design.md)
+[docs/design/2026-05-08-vibe-coding-ai-workflow-technical-design.md](docs/design/2026-05-08-vibe-coding-ai-workflow-technical-design.md)
+
+## 第一版实现
+
+当前仓库包含一个可运行的 MVP：
+
+- `backend/`：Python + FastAPI 主程序，负责发现节点/工作流、运行编排、状态持久化、节点 CLI 代理、确认/停止/删除接口和节点 UI 托管。
+- `frontend/`：React + TypeScript 控制台，用于启动工作流、查看运行状态、确认节点继续执行。
+- `examples/`：示例节点和示例工作流，可用于验证固定 CLI 协议。
+- `data/runs/`：默认运行数据目录。
+
+### 启动后端
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+可通过环境变量修改目录：
+
+```bash
+VCAW_NODES_DIR=/path/to/nodes \
+VCAW_WORKFLOWS_DIR=/path/to/workflows \
+VCAW_RUNS_DIR=/path/to/runs \
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+### 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+前端默认访问 `http://127.0.0.1:8000`。如需修改：
+
+```bash
+VITE_API_BASE=http://127.0.0.1:8000 npm run dev
+```
+
+### 验证示例流程
+
+1. 打开前端页面。
+2. 启动「客户数据处理流程」。
+3. 第一个节点进入 `待确认` 后，打开节点 UI 修改数据并保存。
+4. 点击「确认继续」，第二个节点会生成报告。
