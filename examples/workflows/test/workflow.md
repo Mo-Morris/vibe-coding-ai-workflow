@@ -1,6 +1,6 @@
-name: dataclean
-label: 数据清洗
-description: ''
+name: test
+label: 测试
+description: 测试
 mode: manual-confirm
 nodes:
 - id: csv-table-editor

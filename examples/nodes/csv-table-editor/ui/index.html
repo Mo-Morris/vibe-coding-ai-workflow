@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CSV 表格编辑</title>
-    <link rel="stylesheet" href="assets/style.css" />
+    <link rel="stylesheet" href="assets/style.css?v=2" />
   </head>
   <body>
     <main>
@@ -16,8 +16,12 @@
       <section id="summary"></section>
       <section class="upload-panel">
         <label for="csvFile">上传 CSV</label>
-        <input id="csvFile" type="file" accept=".csv,text/csv" />
-        <button id="uploadBtn" type="button">上传并读取</button>
+        <div class="file-picker">
+          <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
+          <label class="file-picker__button" for="csvFile">选择 CSV 文件</label>
+          <span id="fileName" class="file-picker__name">未选择文件</span>
+        </div>
+        <button id="uploadBtn" type="button" hidden>上传并读取</button>
         <span id="uploadStatus"></span>
       </section>
       <section class="toolbar">
@@ -33,6 +37,6 @@
         </table>
       </div>
     </main>
-    <script src="assets/main.js"></script>
+    <script src="assets/main.js?v=2"></script>
   </body>
 </html>

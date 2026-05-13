@@ -38,6 +38,29 @@ button {
   background: #ffffff;
   padding: 8px 12px;
   cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+button:hover {
+  border-color: #8fa5b8;
+  background: #f8fbfd;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:focus-visible,
+.toolbar input[type="search"]:focus-visible,
+td input[type="text"]:focus-visible {
+  outline: 3px solid rgba(92, 75, 138, 0.22);
+  outline-offset: 2px;
 }
 
 #summary {
@@ -69,9 +92,56 @@ button {
   padding: 12px;
 }
 
-.upload-panel input[type="file"] {
+.file-picker {
+  display: flex;
+  align-items: center;
   flex: 1;
-  min-width: 220px;
+  min-width: 260px;
+  border: 1px solid #d9e2ea;
+  border-radius: 8px;
+  background: #f8fbfd;
+  overflow: hidden;
+}
+
+.file-picker__button {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid #d9e2ea;
+  background: #eef4f8;
+  padding: 8px 12px;
+  color: #18232f;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  transition: background 120ms ease;
+}
+
+.file-picker__button:hover {
+  background: #e6eef4;
+}
+
+.file-picker__name {
+  min-width: 0;
+  padding: 8px 12px;
+  color: #456174;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#uploadBtn {
+  border-color: #5c4b8a;
+  background: #5c4b8a;
+  color: #ffffff;
+}
+
+#uploadBtn:hover {
+  border-color: #4f3f7a;
+  background: #4f3f7a;
 }
 
 #uploadStatus {

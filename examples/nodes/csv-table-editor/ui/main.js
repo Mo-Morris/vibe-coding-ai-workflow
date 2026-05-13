@@ -112,6 +112,14 @@ document.querySelector("#resetBtn").addEventListener("click", async () => {
   }
 });
 
+document.querySelector("#csvFile").addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  const fileName = file?.name || "未选择文件";
+  document.querySelector("#fileName").textContent = fileName;
+  document.querySelector("#uploadBtn").hidden = !file;
+  document.querySelector("#uploadStatus").textContent = "";
+});
+
 document.querySelector("#uploadBtn").addEventListener("click", async () => {
   const input = document.querySelector("#csvFile");
   const status = document.querySelector("#uploadStatus");
@@ -127,7 +135,10 @@ document.querySelector("#uploadBtn").addEventListener("click", async () => {
   status.textContent = "上传中…";
   try {
     const result = await uploadApi(`/api/runs/${runId}/nodes/${nodeId}/upload`, formData);
-    status.textContent = result.node?.summary || "上传完成";
+    status.textContent = result.summary || result.node?.summary || "上传完成";
+    input.value = "";
+    document.querySelector("#fileName").textContent = "未选择文件";
+    document.querySelector("#uploadBtn").hidden = true;
     searchQuery = "";
     document.querySelector("#search").value = "";
     await load();
