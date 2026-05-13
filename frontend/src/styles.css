@@ -614,35 +614,92 @@ label {
   margin-top: 12px;
 }
 
-.capability-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid #d8dee8;
-  border-radius: 999px;
-  background: #f8fafc;
-  color: #344054;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 850;
+.capability-list.capability-list--switches:not(.compact-list) {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 10px;
 }
 
-.capability-pill em {
-  color: #667085;
-  font-style: normal;
+.capability-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #eef2f6;
+  border-radius: 8px;
+  background: #fcfcfd;
+}
+
+.capability-switch-row--compact {
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 5px 10px 5px 12px;
+  border-radius: 999px;
+  border-color: #e4e7ec;
+  background: #f8fafc;
+}
+
+.capability-switch-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #344054;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+
+.capability-switch-row--compact .capability-switch-name {
+  font-size: 12px;
   font-weight: 750;
 }
 
-.capability-pill.enabled {
-  border-color: #75e0a7;
-  background: #ecfdf3;
-  color: #067647;
+.capability-switch-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  background: #e4e7ec;
+  box-shadow: inset 0 1px 2px rgb(16 24 40 / 6%);
+  transition: background 0.18s ease;
 }
 
-.capability-pill.disabled {
-  border-color: #d0d5dd;
-  background: #f2f4f7;
-  color: #475467;
+.capability-switch-row--compact .capability-switch-track {
+  width: 38px;
+  height: 22px;
+}
+
+.capability-switch-track.is-on {
+  background: #6ce9a6;
+  box-shadow: inset 0 1px 2px rgb(6 118 71 / 12%);
+}
+
+.capability-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgb(16 24 40 / 18%);
+  transition: transform 0.18s ease;
+}
+
+.capability-switch-row--compact .capability-switch-thumb {
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+}
+
+.capability-switch-track.is-on .capability-switch-thumb {
+  transform: translateX(18px);
+}
+
+.capability-switch-row--compact .capability-switch-track.is-on .capability-switch-thumb {
+  transform: translateX(16px);
 }
 
 .definition-source pre {

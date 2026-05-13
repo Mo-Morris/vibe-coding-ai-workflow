@@ -757,6 +757,25 @@ function capabilityEntries(node: NodeDefinition) {
   return Object.entries(node.capabilities ?? {});
 }
 
+function CapabilitySwitchRow({ name, enabled, compact }: { name: string; enabled: boolean; compact?: boolean }) {
+  const stateLabel = enabled ? "开启" : "关闭";
+  return (
+    <div className={`capability-switch-row${compact ? " capability-switch-row--compact" : ""}`}>
+      <span className="capability-switch-name">{name}</span>
+      <span
+        role="switch"
+        aria-checked={enabled}
+        aria-readonly="true"
+        aria-label={`${name} ${stateLabel}`}
+        tabIndex={-1}
+        className={`capability-switch-track${enabled ? " is-on" : ""}`}
+      >
+        <span className="capability-switch-thumb" aria-hidden />
+      </span>
+    </div>
+  );
+}
+
 function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNode, onSetNodeSearch, onViewNode, onViewNodeList }: NodeManagementProps) {
   if (selectedNode) {
     const capabilities = capabilityEntries(selectedNode);
@@ -801,13 +820,10 @@ function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNo
               <h3>能力</h3>
               <span>{capabilities.length} 项</span>
             </div>
-            <div className="capability-list">
+            <div className="capability-list capability-list--switches">
               {capabilities.length === 0 && <p className="muted">未声明能力。</p>}
               {capabilities.map(([name, enabled]) => (
-                <span className={`capability-pill ${enabled ? "enabled" : "disabled"}`} key={name}>
-                  {name}
-                  <em>{enabled ? "开启" : "关闭"}</em>
-                </span>
+                <CapabilitySwitchRow key={name} name={name} enabled={Boolean(enabled)} />
               ))}
             </div>
           </section>
@@ -850,12 +866,9 @@ function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNo
                     {node.path && <span>{node.path}</span>}
                   </div>
                   {capabilities.length > 0 && (
-                    <div className="capability-list compact-list">
+                    <div className="capability-list compact-list capability-list--switches">
                       {capabilities.map(([name, enabled]) => (
-                        <span className={`capability-pill ${enabled ? "enabled" : "disabled"}`} key={name}>
-                          {name}
-                          <em>{enabled ? "开启" : "关闭"}</em>
-                        </span>
+                        <CapabilitySwitchRow key={name} name={name} enabled={Boolean(enabled)} compact />
                       ))}
                     </div>
                   )}
