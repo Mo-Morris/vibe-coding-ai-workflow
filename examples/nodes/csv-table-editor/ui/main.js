@@ -19,6 +19,15 @@ async function api(path, options) {
   return response.json();
 }
 
+async function uploadApi(path, formData) {
+  const response = await fetch(path, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
 let lastColumns = [];
 let searchQuery = "";
 
@@ -100,6 +109,30 @@ document.querySelector("#resetBtn").addEventListener("click", async () => {
     await loadTable();
   } catch (error) {
     document.querySelector("#summary").textContent = error.message;
+  }
+});
+
+document.querySelector("#uploadBtn").addEventListener("click", async () => {
+  const input = document.querySelector("#csvFile");
+  const status = document.querySelector("#uploadStatus");
+  const file = input.files?.[0];
+  if (!file) {
+    status.textContent = "请选择 CSV 文件";
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("field", "csv");
+  status.textContent = "上传中…";
+  try {
+    const result = await uploadApi(`/api/runs/${runId}/nodes/${nodeId}/upload`, formData);
+    status.textContent = result.node?.summary || "上传完成";
+    searchQuery = "";
+    document.querySelector("#search").value = "";
+    await load();
+  } catch (error) {
+    status.textContent = error.message;
   }
 });
 

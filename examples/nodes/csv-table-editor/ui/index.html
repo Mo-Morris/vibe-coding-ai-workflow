@@ -14,6 +14,12 @@
         <button id="confirm" type="button">确认继续</button>
       </header>
       <section id="summary"></section>
+      <section class="upload-panel">
+        <label for="csvFile">上传 CSV</label>
+        <input id="csvFile" type="file" accept=".csv,text/csv" />
+        <button id="uploadBtn" type="button">上传并读取</button>
+        <span id="uploadStatus"></span>
+      </section>
       <section class="toolbar">
         <label for="search">搜索</label>
         <input id="search" type="search" placeholder="在当前表中搜索…" />

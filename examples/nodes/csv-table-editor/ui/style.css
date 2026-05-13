@@ -48,7 +48,8 @@ button {
   margin-bottom: 16px;
 }
 
-.toolbar {
+.toolbar,
+.upload-panel {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -56,8 +57,26 @@ button {
   margin-bottom: 14px;
 }
 
-.toolbar label {
+.toolbar label,
+.upload-panel label {
   font-size: 14px;
+}
+
+.upload-panel {
+  border: 1px solid #d9e2ea;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.upload-panel input[type="file"] {
+  flex: 1;
+  min-width: 220px;
+}
+
+#uploadStatus {
+  color: #456174;
+  font-size: 13px;
 }
 
 .toolbar input[type="search"] {

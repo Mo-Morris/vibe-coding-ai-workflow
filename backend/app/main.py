@@ -12,7 +12,7 @@ from re import fullmatch
 from typing import Any
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -109,6 +109,13 @@ def validate_slug(value: str, field_name: str) -> str:
     return value
 
 
+def safe_filename(filename: str) -> str:
+    name = Path(filename or "upload").name.strip() or "upload"
+    safe = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in name)
+    safe = safe.strip("._") or "upload"
+    return safe[:160]
+
+
 def node_definition(node_name: str) -> tuple[Path, dict[str, Any]]:
     node_dir = NODES_DIR / node_name
     node_file = node_dir / "node.md"
@@ -173,6 +180,13 @@ def find_workflow_node(run: dict[str, Any], node_id: str) -> dict[str, Any]:
         if node.get("id") == node_id:
             return node
     raise HTTPException(status_code=404, detail=f"Node run not found: {node_id}")
+
+
+def current_node_definition(run_id: str, node_id: str) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    run = load_run(run_id)
+    workflow_node = find_workflow_node(run, node_id)
+    node_dir, node_def = node_definition(workflow_node["node"])
+    return workflow_node, node_dir, node_def
 
 
 def node_has_ui(node_name: str) -> bool:
@@ -479,6 +493,7 @@ def get_node_result(run_id: str, node_id: str) -> dict[str, Any]:
 def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
     run = load_run(run_id)
     workflow_node = find_workflow_node(run, node_id)
+    _, node_def = node_definition(workflow_node["node"])
     status = load_node_status(run_id, node_id)
     return {
         "runId": run_id,
@@ -486,7 +501,10 @@ def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
         "nodeName": workflow_node["node"],
         "mode": run.get("mode"),
         "status": status.get("status"),
+        "capabilities": node_def.get("capabilities", {}),
         "resultUrl": f"/api/runs/{run_id}/nodes/{node_id}/result",
+        "uploadUrl": f"/api/runs/{run_id}/nodes/{node_id}/upload",
+        "uploads": read_json(node_run_dir(run_id, node_id) / "data" / "uploads.json", []),
     }
 
 
@@ -525,6 +543,59 @@ def search_node(run_id: str, node_id: str, request: SearchRequest) -> Any:
         ["--dataset", request.dataset, "--q", request.q, "--page", str(request.page), "--page-size", str(request.pageSize)],
         capture_json=True,
     )
+
+
+@app.post("/api/runs/{run_id}/nodes/{node_id}/upload")
+def upload_node_file(
+    run_id: str,
+    node_id: str,
+    file: UploadFile = File(...),
+    field: str = Form("file"),
+) -> Any:
+    _, _, node_def = current_node_definition(run_id, node_id)
+    if not node_def.get("capabilities", {}).get("upload"):
+        raise HTTPException(status_code=409, detail="Node does not support file upload")
+
+    safe_name = safe_filename(file.filename or "upload")
+    upload_dir = node_run_dir(run_id, node_id) / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    target_path = (upload_dir / f"{stamp}-{safe_name}").resolve()
+    if upload_dir.resolve() not in target_path.parents:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
+
+    with target_path.open("wb") as output:
+        shutil.copyfileobj(file.file, output)
+
+    upload_record = {
+        "field": field,
+        "filename": file.filename or safe_name,
+        "path": str(target_path),
+        "size": target_path.stat().st_size,
+        "uploadedAt": now_iso(),
+    }
+    uploads_path = node_run_dir(run_id, node_id) / "data" / "uploads.json"
+    uploads = read_json(uploads_path, [])
+    if not isinstance(uploads, list):
+        uploads = []
+    uploads.append(upload_record)
+    write_json(uploads_path, uploads)
+
+    node_result = run_node_command(
+        run_id,
+        node_id,
+        "upload",
+        [
+            "--file-path",
+            str(target_path),
+            "--field",
+            field,
+            "--filename",
+            file.filename or safe_name,
+        ],
+        capture_json=True,
+    )
+    return {"ok": True, "upload": upload_record, "node": node_result}
 
 
 @app.get("/api/runs/{run_id}/nodes/{node_id}/records/{dataset}/{record_id}")

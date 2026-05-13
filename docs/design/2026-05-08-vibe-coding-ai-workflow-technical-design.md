@@ -59,6 +59,7 @@ command: python main.py
 ui:
   entry: ui/index.html
 capabilities:
+  upload: true
   query: true
   search: true
   get: true
@@ -245,7 +246,23 @@ stopped
 <node-run-dir>/result.json
 ```
 
-### 10.2 query
+### 10.2 upload
+
+读取主程序保存到当前节点运行数据区的上传文件。
+
+```bash
+<command> upload \
+  --run-dir <本次工作流运行目录> \
+  --node-run-dir <当前节点运行目录> \
+  --node-dir <节点源码目录> \
+  --file-path <上传文件路径> \
+  --field <上传字段名> \
+  --filename <原始文件名>
+```
+
+节点应读取 `--file-path`，更新自己的数据存储，并向 stdout 输出 JSON。
+
+### 10.3 query
 
 分页查询数据集。
 
@@ -281,7 +298,7 @@ stopped
 }
 ```
 
-### 10.3 search
+### 10.4 search
 
 关键词搜索数据集。
 
@@ -296,7 +313,7 @@ stopped
   --page-size 100
 ```
 
-### 10.4 get
+### 10.5 get
 
 读取单条记录详情。
 
@@ -309,7 +326,7 @@ stopped
   --id <记录ID>
 ```
 
-### 10.5 update
+### 10.6 update
 
 写回人工清洗、标注或修正结果。
 
@@ -338,7 +355,7 @@ stopped
 }
 ```
 
-### 10.6 错误返回
+### 10.7 错误返回
 
 所有 query、search、get、update action 的错误统一输出到 stdout：
 
@@ -363,6 +380,7 @@ GET  /api/runs/:runId/nodes/:nodeId/result
 GET  /api/runs/:runId/nodes/:nodeId/context
 
 POST /api/runs/:runId/nodes/:nodeId/query
+POST /api/runs/:runId/nodes/:nodeId/upload
 POST /api/runs/:runId/nodes/:nodeId/search
 GET  /api/runs/:runId/nodes/:nodeId/records/:dataset/:id
 PATCH /api/runs/:runId/nodes/:nodeId/records/:dataset/:id

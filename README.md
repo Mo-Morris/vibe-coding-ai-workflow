@@ -39,6 +39,7 @@ command: python main.py
 ui:
   entry: ui/index.html
 capabilities:
+  upload: true
   query: true
   search: true
   get: true
@@ -77,6 +78,7 @@ MVP 先支持线性执行，文件结构预留 `depends_on`，以后可以扩展
 真实数据可以是 CSV、JSONL、SQLite、Parquet、Excel、远程 API 或任意自定义数据源。主程序不直接理解这些数据源，而是通过节点固定 CLI 协议访问：
 
 - `run`：执行节点核心逻辑。
+- `upload`：读取主程序保存到节点数据区的上传文件。
 - `query`：分页查询数据集。
 - `search`：关键词搜索。
 - `get`：读取单条详情。

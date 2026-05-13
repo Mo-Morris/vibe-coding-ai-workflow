@@ -84,6 +84,32 @@ def save_state(node_run_dir: Path, columns: list[dict[str, str]], rows: list[dic
     )
 
 
+def write_result(node_run_dir: Path, summary: str, total: int) -> None:
+    (node_run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "summary": summary,
+                "datasets": [
+                    {
+                        "name": DATASET_NAME,
+                        "label": "CSV 数据",
+                        "type": "table",
+                        "queryable": True,
+                        "searchable": True,
+                        "editable": True,
+                        "total": total,
+                    }
+                ],
+                "ui": {"entry": "ui/index.html"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
@@ -103,29 +129,24 @@ def run_cmd(args: argparse.Namespace) -> None:
     summary = f"已从 CSV 加载 {len(rows)} 行，{len(keys)} 列。"
     if not keys:
         summary = "CSV 无表头或为空，已创建空表。"
-    (node_run_dir / "result.json").write_text(
-        json.dumps(
-            {
-                "status": "success",
-                "summary": summary,
-                "datasets": [
-                    {
-                        "name": DATASET_NAME,
-                        "label": "CSV 数据",
-                        "type": "table",
-                        "queryable": True,
-                        "searchable": True,
-                        "editable": True,
-                        "total": len(rows),
-                    }
-                ],
-                "ui": {"entry": "ui/index.html"},
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    write_result(node_run_dir, summary, len(rows))
+
+
+def upload_cmd(args: argparse.Namespace) -> None:
+    node_run_dir = Path(args.node_run_dir)
+    file_path = Path(args.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        print_json({"ok": False, "error": {"code": "FILE_NOT_FOUND", "message": str(file_path)}})
+        return
+    text = file_path.read_text(encoding="utf-8-sig")
+    keys, rows = parse_csv_text(text)
+    columns = columns_from_keys(keys)
+    save_state(node_run_dir, columns, rows)
+    summary = f"已上传 {args.filename}，加载 {len(rows)} 行，{len(keys)} 列。"
+    if not keys:
+        summary = f"已上传 {args.filename}，但 CSV 无表头或为空，已创建空表。"
+    write_result(node_run_dir, summary, len(rows))
+    print_json({"ok": True, "summary": summary, "rows": len(rows), "columns": len(keys)})
 
 
 def query_cmd(args: argparse.Namespace) -> None:
@@ -200,13 +221,17 @@ def update_cmd(args: argparse.Namespace) -> None:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     sub = root.add_subparsers(dest="action", required=True)
-    for action in ["run", "query", "search", "get", "update"]:
+    for action in ["run", "upload", "query", "search", "get", "update"]:
         command = sub.add_parser(action)
         command.add_argument("--run-dir", required=True)
         command.add_argument("--node-run-dir", required=True)
         command.add_argument("--node-dir", required=True)
         if action == "run":
             command.add_argument("--workflow-file", required=True)
+        if action == "upload":
+            command.add_argument("--file-path", required=True)
+            command.add_argument("--field", default="file")
+            command.add_argument("--filename", required=True)
         if action in {"query", "search", "get", "update"}:
             command.add_argument("--dataset", required=True)
         if action in {"query", "search"}:
@@ -228,6 +253,8 @@ def main() -> None:
     args = parser().parse_args()
     if args.action == "run":
         run_cmd(args)
+    elif args.action == "upload":
+        upload_cmd(args)
     elif args.action == "query":
         query_cmd(args)
     elif args.action == "search":

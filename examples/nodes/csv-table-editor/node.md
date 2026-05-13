@@ -5,6 +5,7 @@ command: python3 main.py
 ui:
   entry: ui/index.html
 capabilities:
+  upload: true
   query: true
   search: true
   get: true
