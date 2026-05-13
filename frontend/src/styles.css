@@ -208,7 +208,8 @@ input::placeholder {
 
 .content {
   width: 100%;
-  max-width: 1360px;
+  max-width: 1600px;
+  margin: 0 auto;
   padding: 34px clamp(22px, 4vw, 48px) 48px;
 }
 
@@ -979,6 +980,24 @@ label {
   border: 1px solid #d8dee8;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.node-runtime-stack {
+  min-width: 0;
+  width: min(100%, 1280px);
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+
+.node-runtime-stack .node-ui-frame {
+  min-height: 440px;
+  height: min(540px, calc(100vh - 360px));
+}
+
+.node-runtime-stack .node-console {
+  min-height: 240px;
+  height: 280px;
 }
 
 .node-console-wrap {

@@ -5,3 +5,4 @@ data/runs/*
 !data/runs/.gitkeep
 __pycache__/
 .DS_Store
+.cursor/

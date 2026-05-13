@@ -73,6 +73,8 @@ type NodeLogs = {
   stdout: string;
   stderr: string;
   combined: string;
+  stdoutOffset: number;
+  stderrOffset: number;
 };
 
 const emptyDraft: WorkflowDraft = {
@@ -114,7 +116,6 @@ const RUN_STATUS_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "pending", label: statusLabel("pending") },
   { value: "running", label: statusLabel("running") },
   { value: "success", label: statusLabel("success") },
-  { value: "waiting-confirmation", label: statusLabel("waiting-confirmation") },
   { value: "failed", label: statusLabel("failed") },
   { value: "stopped", label: statusLabel("stopped") },
   { value: "stopping", label: statusLabel("stopping") },
@@ -1126,7 +1127,13 @@ function RunConsoleView({
   onViewWorkflow,
 }: RunConsoleProps) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
-  const [selectedNodeLogs, setSelectedNodeLogs] = useState<NodeLogs>({ stdout: "", stderr: "", combined: "" });
+  const [selectedNodeLogs, setSelectedNodeLogs] = useState<NodeLogs>({
+    stdout: "",
+    stderr: "",
+    combined: "",
+    stdoutOffset: 0,
+    stderrOffset: 0,
+  });
   const [logError, setLogError] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
@@ -1182,16 +1189,37 @@ function RunConsoleView({
 
   useEffect(() => {
     if (!selectedRun || !selectedNodeId) {
-      setSelectedNodeLogs({ stdout: "", stderr: "", combined: "" });
+      setSelectedNodeLogs({ stdout: "", stderr: "", combined: "", stdoutOffset: 0, stderrOffset: 0 });
       return;
     }
 
     let cancelled = false;
+    let stdoutOffset = 0;
+    let stderrOffset = 0;
+    setSelectedNodeLogs({ stdout: "", stderr: "", combined: "", stdoutOffset: 0, stderrOffset: 0 });
+
     async function loadLogs() {
       try {
-        const logs = await api<NodeLogs>(`/api/runs/${selectedRun!.id}/nodes/${selectedNodeId}/logs`);
+        const query = stdoutOffset > 0 || stderrOffset > 0
+          ? `?stdoutOffset=${stdoutOffset}&stderrOffset=${stderrOffset}`
+          : "";
+        const logs = await api<NodeLogs>(`/api/runs/${selectedRun!.id}/nodes/${selectedNodeId}/logs${query}`);
         if (!cancelled) {
-          setSelectedNodeLogs(logs);
+          setSelectedNodeLogs((prev) => {
+            const stdoutReset = logs.stdoutOffset < stdoutOffset;
+            const stderrReset = logs.stderrOffset < stderrOffset;
+            const stdout = stdoutReset ? logs.stdout : prev.stdout + logs.stdout;
+            const stderr = stderrReset ? logs.stderr : prev.stderr + logs.stderr;
+            return {
+              stdout,
+              stderr,
+              combined: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"),
+              stdoutOffset: logs.stdoutOffset,
+              stderrOffset: logs.stderrOffset,
+            };
+          });
+          stdoutOffset = logs.stdoutOffset;
+          stderrOffset = logs.stderrOffset;
           setLogError("");
         }
       } catch (err) {
@@ -1207,11 +1235,15 @@ function RunConsoleView({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedNodeId, selectedRun]);
+  }, [selectedNodeId, selectedRun?.id]);
 
   if (selectedRun) {
     const selectedWorkflowNode = selectedRun.workflow.nodes.find((node) => node.id === selectedNodeId) ?? selectedRun.workflow.nodes[0];
     const selectedStatus = selectedWorkflowNode ? selectedRun.nodeStatuses?.[selectedWorkflowNode.id] : undefined;
+    const selectedNodeIndex = selectedWorkflowNode
+      ? selectedRun.workflow.nodes.findIndex((node) => node.id === selectedWorkflowNode.id)
+      : -1;
+    const isLastWorkflowNode = selectedNodeIndex === selectedRun.workflow.nodes.length - 1;
     const selectedLogText = selectedNodeLogs.combined || "暂无运行日志。";
 
     return (
@@ -1225,7 +1257,6 @@ function RunConsoleView({
           <div className="actions">
             <button className="secondary-button" onClick={onViewRunList} disabled={busy}>返回运行记录</button>
             <button onClick={() => onViewWorkflow(selectedRun.workflowName)} disabled={busy}>工作流定义</button>
-            <span className={`status ${selectedRun.status}`}>{statusLabel(selectedRun.status)}</span>
             <button className="danger-button" onClick={onStopRun} disabled={busy || selectedRun.status === "stopped"}>停止</button>
             <button className="danger-button" onClick={onDeleteRun} disabled={busy}>删除</button>
           </div>
@@ -1267,28 +1298,30 @@ function RunConsoleView({
                     <p className="muted">{selectedWorkflowNode.node}</p>
                   </div>
                   <div className="node-actions">
-                    <span className={`status ${selectedStatus?.status ?? "pending"}`}>{statusLabel(selectedStatus?.status ?? "pending")}</span>
                     {selectedStatus?.status === "waiting-confirmation" && (
-                      <button className="primary-button" onClick={() => onConfirmNode(selectedWorkflowNode.id)} disabled={busy}>确认继续</button>
+                      <button className="primary-button" onClick={() => onConfirmNode(selectedWorkflowNode.id)} disabled={busy}>
+                        {isLastWorkflowNode ? "确认完成" : "确认继续"}
+                      </button>
                     )}
                   </div>
                 </div>
 
                 {selectedStatus?.error && <p className="error-text">{selectedStatus.error}</p>}
 
-                {selectedStatus?.hasUi ? (
-                  <iframe
-                    className="node-ui-frame"
-                    title={`${selectedWorkflowNode.id} UI`}
-                    src={`${API_BASE}${selectedStatus.uiUrl}`}
-                  />
-                ) : (
+                <div className="node-runtime-stack">
+                  {selectedStatus?.hasUi && (
+                    <iframe
+                      className="node-ui-frame"
+                      title={`${selectedWorkflowNode.id} UI`}
+                      src={`${API_BASE}${selectedStatus.uiUrl}`}
+                    />
+                  )}
                   <div className="node-console-wrap">
                     <div className="console-title">运行日志</div>
                     {logError && <p className="error-text">{logError}</p>}
                     <pre className="node-console">{selectedLogText}</pre>
                   </div>
-                )}
+                </div>
               </>
             )}
           </section>

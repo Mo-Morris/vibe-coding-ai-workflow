@@ -37,6 +37,7 @@ app.add_middleware(
 
 processes: dict[tuple[str, str], subprocess.Popen[Any]] = {}
 process_lock = threading.Lock()
+NO_CACHE_HEADERS = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "Expires": "0"}
 
 
 class RunWorkflowRequest(BaseModel):
@@ -175,6 +176,49 @@ def workflow_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
     return run.get("workflow", {}).get("nodes", [])
 
 
+def load_run_node_statuses(run_id: str, run: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {node["id"]: load_node_status(run_id, node["id"]) for node in workflow_nodes(run)}
+
+
+def node_needs_manual_confirmation(run: dict[str, Any], node_id: str, status: dict[str, Any]) -> bool:
+    if run.get("mode") != "manual-confirm" or status.get("status") != "success":
+        return False
+    return not (node_run_dir(run["id"], node_id) / "confirm.json").exists()
+
+
+def effective_node_status(run: dict[str, Any], node_id: str, status: dict[str, Any]) -> dict[str, Any]:
+    if node_needs_manual_confirmation(run, node_id, status):
+        return {**status, "status": "waiting-confirmation"}
+    return status
+
+
+def aggregate_run_status(run: dict[str, Any], statuses: dict[str, dict[str, Any]]) -> str:
+    stored_status = run.get("status", "pending")
+    if stored_status in {"stopping", "stopped"}:
+        return stored_status
+    status_values = [status.get("status", "pending") for status in statuses.values()]
+    if any(status == "failed" for status in status_values):
+        return "failed"
+    if any(status == "stopping" for status in status_values):
+        return "stopping"
+    if any(status == "running" for status in status_values):
+        return "running"
+    if any(status == "waiting-confirmation" for status in status_values):
+        return "running"
+    if any(status == "pending" for status in status_values):
+        return "running"
+    if any(node_needs_manual_confirmation(run, node_id, status) for node_id, status in statuses.items()):
+        return "running"
+    if statuses and all(status in TERMINAL_NODE_STATES for status in status_values):
+        return "success"
+    return stored_status
+
+
+def run_with_aggregate_status(run_id: str, run: dict[str, Any]) -> dict[str, Any]:
+    statuses = load_run_node_statuses(run_id, run)
+    return {**run, "status": aggregate_run_status(run, statuses)}
+
+
 def find_workflow_node(run: dict[str, Any], node_id: str) -> dict[str, Any]:
     for node in workflow_nodes(run):
         if node.get("id") == node_id:
@@ -272,6 +316,63 @@ def run_node_command(
     return return_code
 
 
+def parse_last_json_line(text: str) -> Any:
+    for line in reversed(text.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise HTTPException(status_code=502, detail="Node returned no JSON response")
+
+
+def run_node_command_logged_json(
+    run_id: str,
+    node_id: str,
+    action: str,
+    extra_args: list[str],
+) -> Any:
+    run = load_run(run_id)
+    workflow_node = find_workflow_node(run, node_id)
+    source_node_dir, node_def = node_definition(workflow_node["node"])
+    current_run_dir = run_dir(run_id)
+    current_node_dir = node_run_dir(run_id, node_id)
+    command = build_node_command(
+        node_def["command"],
+        action,
+        [
+            "--run-dir",
+            str(current_run_dir),
+            "--node-run-dir",
+            str(current_node_dir),
+            "--node-dir",
+            str(source_node_dir),
+            *extra_args,
+        ],
+    )
+
+    logs_dir = current_node_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = logs_dir / "stdout.log"
+    stderr_path = logs_dir / "stderr.log"
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(command, cwd=source_node_dir, stdout=stdout, stderr=stderr, text=True)
+        with process_lock:
+            processes[(run_id, node_id)] = process
+        return_code = process.wait()
+        with process_lock:
+            processes.pop((run_id, node_id), None)
+
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    if return_code != 0:
+        detail = stderr_text.strip() or stdout_text.strip() or "Node command failed"
+        raise HTTPException(status_code=500, detail=detail)
+    return parse_last_json_line(stdout_text)
+
+
 def schedule_from(run_id: str, node_id: str, background_tasks: BackgroundTasks | None = None) -> None:
     if background_tasks:
         background_tasks.add_task(execute_from_node, run_id, node_id)
@@ -316,8 +417,9 @@ def execute_from_node(run_id: str, start_node_id: str) -> None:
             save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": now_iso()})
             return
 
-        following_node_id = next_node_id(load_run(run_id), node_id)
-        if load_run(run_id).get("mode") == "manual-confirm" and following_node_id:
+        current_run = load_run(run_id)
+        following_node_id = next_node_id(current_run, node_id)
+        if current_run.get("mode") == "manual-confirm":
             save_node_status(run_id, node_id, {**status, "status": "waiting-confirmation", "endedAt": now_iso(), "progress": 100})
             save_run(run_id, {**load_run(run_id), "status": "waiting-confirmation", "currentNodeId": node_id})
             return
@@ -460,7 +562,10 @@ def create_run(workflow_name: str, request: RunWorkflowRequest, background_tasks
 def list_runs() -> dict[str, Any]:
     runs = []
     for run_json in sorted(RUNS_DIR.glob("*/run.json"), reverse=True):
-        runs.append(read_json(run_json, {}))
+        run = read_json(run_json, {})
+        if run.get("id"):
+            run = run_with_aggregate_status(run["id"], run)
+        runs.append(run)
     return {"runs": runs}
 
 
@@ -469,19 +574,21 @@ def get_run(run_id: str) -> dict[str, Any]:
     run = load_run(run_id)
     statuses = {}
     for node in workflow_nodes(run):
-        status = load_node_status(run_id, node["id"])
+        status = effective_node_status(run, node["id"], load_node_status(run_id, node["id"]))
         has_ui = node_has_ui(node["node"])
         statuses[node["id"]] = {
             **status,
             "hasUi": has_ui,
             "uiUrl": f"/ui/runs/{run_id}/nodes/{node['id']}/" if has_ui else None,
         }
-    return {**run, "nodeStatuses": statuses}
+    return {**run, "status": aggregate_run_status(run, statuses), "nodeStatuses": statuses}
 
 
 @app.get("/api/runs/{run_id}/nodes/{node_id}")
 def get_node_run(run_id: str, node_id: str) -> dict[str, Any]:
-    return load_node_status(run_id, node_id)
+    run = load_run(run_id)
+    find_workflow_node(run, node_id)
+    return effective_node_status(run, node_id, load_node_status(run_id, node_id))
 
 
 @app.get("/api/runs/{run_id}/nodes/{node_id}/result")
@@ -494,7 +601,7 @@ def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
     run = load_run(run_id)
     workflow_node = find_workflow_node(run, node_id)
     _, node_def = node_definition(workflow_node["node"])
-    status = load_node_status(run_id, node_id)
+    status = effective_node_status(run, node_id, load_node_status(run_id, node_id))
     return {
         "runId": run_id,
         "nodeId": node_id,
@@ -508,18 +615,36 @@ def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
     }
 
 
+def read_log_increment(path: Path, offset: int | None) -> tuple[str, int]:
+    if not path.exists():
+        return "", 0
+    size = path.stat().st_size
+    start = offset if offset is not None and 0 <= offset <= size else 0
+    with path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read()
+    return data.decode("utf-8", errors="replace"), start + len(data)
+
+
 @app.get("/api/runs/{run_id}/nodes/{node_id}/logs")
-def get_node_logs(run_id: str, node_id: str) -> dict[str, Any]:
+def get_node_logs(
+    run_id: str,
+    node_id: str,
+    stdoutOffset: int | None = None,
+    stderrOffset: int | None = None,
+) -> dict[str, Any]:
     find_workflow_node(load_run(run_id), node_id)
     logs_dir = node_run_dir(run_id, node_id) / "logs"
     stdout_path = logs_dir / "stdout.log"
     stderr_path = logs_dir / "stderr.log"
-    stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
-    stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    stdout, stdout_offset = read_log_increment(stdout_path, stdoutOffset)
+    stderr, stderr_offset = read_log_increment(stderr_path, stderrOffset)
     return {
         "stdout": stdout,
         "stderr": stderr,
         "combined": "\n".join(part for part in [stdout.strip(), stderr.strip()] if part),
+        "stdoutOffset": stdout_offset,
+        "stderrOffset": stderr_offset,
     }
 
 
@@ -543,6 +668,49 @@ def search_node(run_id: str, node_id: str, request: SearchRequest) -> Any:
         ["--dataset", request.dataset, "--q", request.q, "--page", str(request.page), "--page-size", str(request.pageSize)],
         capture_json=True,
     )
+
+
+@app.post("/api/runs/{run_id}/nodes/{node_id}/params")
+def params_node(run_id: str, node_id: str, payload: dict[str, Any]) -> Any:
+    _, _, node_def = current_node_definition(run_id, node_id)
+    if not node_def.get("capabilities", {}).get("params"):
+        raise HTTPException(status_code=409, detail="Node does not support params")
+    started_at = now_iso()
+    status = load_node_status(run_id, node_id)
+    save_run(run_id, {**load_run(run_id), "status": "running", "currentNodeId": node_id, "endedAt": None})
+    save_node_status(
+        run_id,
+        node_id,
+        {**status, "status": "running", "startedAt": status.get("startedAt") or started_at, "endedAt": None, "error": None},
+    )
+    try:
+        result = run_node_command_logged_json(
+            run_id,
+            node_id,
+            "params",
+            ["--payload", json.dumps(payload, ensure_ascii=False)],
+        )
+    except HTTPException as exc:
+        ended_at = now_iso()
+        save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": str(exc.detail)})
+        save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": ended_at})
+        raise
+
+    ended_at = now_iso()
+    if isinstance(result, dict) and result.get("ok") is False:
+        error = result.get("error", {})
+        message = error.get("message") if isinstance(error, dict) else None
+        save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": message or "Node command failed"})
+        save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": ended_at})
+        return result
+
+    next_status = "waiting-confirmation" if load_run(run_id).get("mode") == "manual-confirm" else "success"
+    save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": next_status, "endedAt": ended_at, "progress": 100})
+    if next_status == "success":
+        save_run(run_id, {**load_run(run_id), "status": "success", "currentNodeId": None, "endedAt": ended_at})
+    else:
+        save_run(run_id, {**load_run(run_id), "status": next_status, "currentNodeId": node_id})
+    return result
 
 
 @app.post("/api/runs/{run_id}/nodes/{node_id}/upload")
@@ -610,12 +778,14 @@ def update_record(run_id: str, node_id: str, dataset: str, record_id: str, patch
 
 @app.post("/api/runs/{run_id}/nodes/{node_id}/confirm")
 def confirm_node(run_id: str, node_id: str, request: ConfirmRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    status = load_node_status(run_id, node_id)
+    run = load_run(run_id)
+    raw_status = load_node_status(run_id, node_id)
+    status = effective_node_status(run, node_id, raw_status)
     if status.get("status") != "waiting-confirmation":
         raise HTTPException(status_code=409, detail="Node is not waiting for confirmation")
     write_json(node_run_dir(run_id, node_id) / "confirm.json", {"confirmed": True, "confirmedAt": now_iso(), "note": request.note})
     save_node_status(run_id, node_id, {**status, "status": "confirmed"})
-    following_node = next_node_id(load_run(run_id), node_id)
+    following_node = next_node_id(run, node_id)
     if following_node:
         schedule_from(run_id, following_node, background_tasks)
     else:
@@ -692,7 +862,7 @@ def node_ui_entry(run_id: str, node_id: str) -> FileResponse:
         raise HTTPException(status_code=400, detail="Invalid UI entry")
     if not entry_path.exists():
         raise HTTPException(status_code=404, detail="Node UI entry not found")
-    return FileResponse(entry_path)
+    return FileResponse(entry_path, headers=NO_CACHE_HEADERS)
 
 
 @app.get("/ui/runs/{run_id}/nodes/{node_id}/assets/{asset_path:path}")
@@ -707,7 +877,7 @@ def node_ui_asset(run_id: str, node_id: str, asset_path: str) -> FileResponse:
         raise HTTPException(status_code=400, detail="Invalid asset path")
     if not path.exists():
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(path)
+    return FileResponse(path, headers=NO_CACHE_HEADERS)
 
 
 frontend_dist = REPO_DIR / "frontend" / "dist"
