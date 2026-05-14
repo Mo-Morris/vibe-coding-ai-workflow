@@ -77,6 +77,9 @@ class SearchRequest(BaseModel):
     pageSize: int = 100
 
 
+DATA_PREVIEW_LIMIT = 5
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
 
@@ -168,8 +171,41 @@ def load_node_status(run_id: str, node_id: str) -> dict[str, Any]:
     return read_json(node_run_dir(run_id, node_id) / "status.json", {})
 
 
+def normalized_progress(value: Any) -> int:
+    try:
+        progress = int(value)
+    except (TypeError, ValueError):
+        progress = 0
+    return max(0, min(100, progress))
+
+
+def normalize_node_status_progress(status: dict[str, Any]) -> dict[str, Any]:
+    if "progress" not in status:
+        return status
+    return {**status, "progress": normalized_progress(status.get("progress"))}
+
+
 def save_node_status(run_id: str, node_id: str, data: dict[str, Any]) -> None:
-    write_json(node_run_dir(run_id, node_id) / "status.json", data)
+    write_json(node_run_dir(run_id, node_id) / "status.json", normalize_node_status_progress(data))
+
+
+def node_was_stopped(status: dict[str, Any]) -> bool:
+    return status.get("status") in {"stopping", "stopped"} or bool(status.get("stopRequestedAt"))
+
+
+def looks_like_stop_log_failure(status: dict[str, Any]) -> bool:
+    if status.get("status") != "failed":
+        return False
+    error = str(status.get("error") or "").lstrip()
+    return error.startswith(("执行参数:", "开始阅卷数据检查:"))
+
+
+def complete_stopped_node(run_id: str, node_id: str, ended_at: str | None = None, run_status: str = "terminated") -> dict[str, Any]:
+    stopped_at = ended_at or now_iso()
+    stopped = {**load_node_status(run_id, node_id), "status": "stopped", "endedAt": stopped_at, "error": None}
+    save_node_status(run_id, node_id, stopped)
+    save_run(run_id, {**load_run(run_id), "status": run_status, "currentNodeId": node_id, "endedAt": stopped_at})
+    return stopped
 
 
 def workflow_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -187,6 +223,8 @@ def node_needs_manual_confirmation(run: dict[str, Any], node_id: str, status: di
 
 
 def effective_node_status(run: dict[str, Any], node_id: str, status: dict[str, Any]) -> dict[str, Any]:
+    if looks_like_stop_log_failure(status):
+        return {**status, "status": "stopped", "error": None}
     if node_needs_manual_confirmation(run, node_id, status):
         return {**status, "status": "waiting-confirmation"}
     return status
@@ -194,7 +232,7 @@ def effective_node_status(run: dict[str, Any], node_id: str, status: dict[str, A
 
 def aggregate_run_status(run: dict[str, Any], statuses: dict[str, dict[str, Any]]) -> str:
     stored_status = run.get("status", "pending")
-    if stored_status in {"stopping", "stopped"}:
+    if stored_status in {"stopping", "stopped", "terminated"}:
         return stored_status
     status_values = [status.get("status", "pending") for status in statuses.values()]
     if any(status == "failed" for status in status_values):
@@ -209,14 +247,33 @@ def aggregate_run_status(run: dict[str, Any], statuses: dict[str, dict[str, Any]
         return "running"
     if any(node_needs_manual_confirmation(run, node_id, status) for node_id, status in statuses.items()):
         return "running"
+    if stored_status == "failed" and any(status == "stopped" for status in status_values):
+        return "terminated"
+    if any(status == "stopped" for status in status_values):
+        return "stopped"
     if statuses and all(status in TERMINAL_NODE_STATES for status in status_values):
         return "success"
     return stored_status
 
 
 def run_with_aggregate_status(run_id: str, run: dict[str, Any]) -> dict[str, Any]:
-    statuses = load_run_node_statuses(run_id, run)
+    statuses = {node_id: effective_node_status(run, node_id, status) for node_id, status in load_run_node_statuses(run_id, run).items()}
     return {**run, "status": aggregate_run_status(run, statuses)}
+
+
+def data_preview_response(node_id: str, data: Any) -> dict[str, Any]:
+    if data is None or data == "" or data == []:
+        return {"nodeId": node_id, "kind": "empty", "total": 0, "preview": None}
+    if isinstance(data, list):
+        return {
+            "nodeId": node_id,
+            "kind": "array",
+            "total": len(data),
+            "preview": data[:DATA_PREVIEW_LIMIT],
+        }
+    if isinstance(data, dict):
+        return {"nodeId": node_id, "kind": "object", "total": 1, "preview": data}
+    return {"nodeId": node_id, "kind": "primitive", "total": 1, "preview": data}
 
 
 def find_workflow_node(run: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -420,7 +477,10 @@ def execute_from_node(run_id: str, start_node_id: str) -> None:
         current_run = load_run(run_id)
         following_node_id = next_node_id(current_run, node_id)
         if current_run.get("mode") == "manual-confirm":
-            save_node_status(run_id, node_id, {**status, "status": "waiting-confirmation", "endedAt": now_iso(), "progress": 100})
+            workflow_node = find_workflow_node(current_run, node_id)
+            _, node_def = node_definition(workflow_node["node"])
+            init_progress = 0 if node_def.get("capabilities", {}).get("params") else 100
+            save_node_status(run_id, node_id, {**status, "status": "waiting-confirmation", "endedAt": now_iso(), "progress": init_progress})
             save_run(run_id, {**load_run(run_id), "status": "waiting-confirmation", "currentNodeId": node_id})
             return
 
@@ -575,10 +635,17 @@ def get_run(run_id: str) -> dict[str, Any]:
     statuses = {}
     for node in workflow_nodes(run):
         status = effective_node_status(run, node["id"], load_node_status(run_id, node["id"]))
-        has_ui = node_has_ui(node["node"])
+        node_dir, node_def = node_definition(node["node"])
+        capabilities = node_def.get("capabilities", {})
+        entry = node_def.get("ui", {}).get("entry")
+        has_ui = False
+        if entry:
+            entry_path = (node_dir / entry).resolve()
+            has_ui = (node_dir in entry_path.parents or entry_path == node_dir) and entry_path.exists()
         statuses[node["id"]] = {
             **status,
             "hasUi": has_ui,
+            "supportsParams": bool(capabilities.get("params")),
             "uiUrl": f"/ui/runs/{run_id}/nodes/{node['id']}/" if has_ui else None,
         }
     return {**run, "status": aggregate_run_status(run, statuses), "nodeStatuses": statuses}
@@ -591,9 +658,32 @@ def get_node_run(run_id: str, node_id: str) -> dict[str, Any]:
     return effective_node_status(run, node_id, load_node_status(run_id, node_id))
 
 
+@app.get("/api/runs/{run_id}/nodes/{node_id}/progress")
+def get_node_progress(run_id: str, node_id: str) -> dict[str, Any]:
+    run = load_run(run_id)
+    find_workflow_node(run, node_id)
+    status = effective_node_status(run, node_id, load_node_status(run_id, node_id))
+    return {
+        "runId": run_id,
+        "nodeId": node_id,
+        "status": status.get("status", "pending"),
+        "progress": normalized_progress(status.get("progress", 0)),
+        "startedAt": status.get("startedAt"),
+        "endedAt": status.get("endedAt"),
+        "error": status.get("error"),
+    }
+
+
 @app.get("/api/runs/{run_id}/nodes/{node_id}/result")
 def get_node_result(run_id: str, node_id: str) -> dict[str, Any]:
     return read_json(node_run_dir(run_id, node_id) / "result.json", {})
+
+
+@app.get("/api/runs/{run_id}/nodes/{node_id}/data-preview")
+def get_node_data_preview(run_id: str, node_id: str) -> dict[str, Any]:
+    find_workflow_node(load_run(run_id), node_id)
+    data = read_json(node_run_dir(run_id, node_id) / "data" / "data.json", None)
+    return data_preview_response(node_id, data)
 
 
 @app.get("/api/runs/{run_id}/nodes/{node_id}/context")
@@ -681,7 +771,7 @@ def params_node(run_id: str, node_id: str, payload: dict[str, Any]) -> Any:
     save_node_status(
         run_id,
         node_id,
-        {**status, "status": "running", "startedAt": status.get("startedAt") or started_at, "endedAt": None, "error": None},
+        {**status, "status": "running", "startedAt": status.get("startedAt") or started_at, "endedAt": None, "error": None, "progress": 0},
     )
     try:
         result = run_node_command_logged_json(
@@ -692,11 +782,20 @@ def params_node(run_id: str, node_id: str, payload: dict[str, Any]) -> Any:
         )
     except HTTPException as exc:
         ended_at = now_iso()
+        if node_was_stopped(load_node_status(run_id, node_id)):
+            run_status = "stopped" if load_run(run_id).get("status") in {"stopping", "stopped"} else "terminated"
+            complete_stopped_node(run_id, node_id, ended_at, run_status=run_status)
+            return {"ok": False, "error": {"code": "NODE_STOPPED", "message": "节点已停止"}}
         save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": str(exc.detail)})
         save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": ended_at})
         raise
 
     ended_at = now_iso()
+    if node_was_stopped(load_node_status(run_id, node_id)):
+        run_status = "stopped" if load_run(run_id).get("status") in {"stopping", "stopped"} else "terminated"
+        complete_stopped_node(run_id, node_id, ended_at, run_status=run_status)
+        return {"ok": False, "error": {"code": "NODE_STOPPED", "message": "节点已停止"}}
+
     if isinstance(result, dict) and result.get("ok") is False:
         error = result.get("error", {})
         message = error.get("message") if isinstance(error, dict) else None
@@ -795,10 +894,36 @@ def confirm_node(run_id: str, node_id: str, request: ConfirmRequest, background_
 
 @app.post("/api/runs/{run_id}/nodes/{node_id}/retry")
 def retry_node(run_id: str, node_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    _, _, node_def = current_node_definition(run_id, node_id)
     status = load_node_status(run_id, node_id)
     if status.get("status") not in {"failed", "stopped"}:
         raise HTTPException(status_code=409, detail="Only failed or stopped nodes can be retried")
-    save_node_status(run_id, node_id, {**status, "status": "pending", "error": None, "endedAt": None})
+    supports_params = bool(node_def.get("capabilities", {}).get("params"))
+    retry_status = {
+        **status,
+        "status": "pending",
+        "error": None,
+        "endedAt": None,
+        "stopRequestedAt": None,
+        "progress": 0,
+    }
+    save_node_status(run_id, node_id, retry_status)
+    save_run(run_id, {**load_run(run_id), "status": "running", "currentNodeId": node_id, "endedAt": None})
+    if supports_params:
+        started_at = now_iso()
+        return_code = run_node_command(run_id, node_id, "run", ["--workflow-file", str(run_dir(run_id) / "workflow.md")])
+        ended_at = now_iso()
+        if return_code != 0:
+            save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": f"Process exited with {return_code}"})
+            save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": ended_at})
+            return {"ok": False, "error": {"code": "NODE_INIT_FAILED", "message": "Node initialization failed"}}
+        save_node_status(
+            run_id,
+            node_id,
+            {**load_node_status(run_id, node_id), "status": "waiting-confirmation", "startedAt": started_at, "endedAt": ended_at, "error": None, "stopRequestedAt": None, "progress": 0},
+        )
+        save_run(run_id, {**load_run(run_id), "status": "waiting-confirmation", "currentNodeId": node_id, "endedAt": None})
+        return {"ok": True}
     schedule_from(run_id, node_id, background_tasks)
     return {"ok": True}
 
@@ -806,26 +931,27 @@ def retry_node(run_id: str, node_id: str, background_tasks: BackgroundTasks) -> 
 @app.post("/api/runs/{run_id}/nodes/{node_id}/stop")
 def stop_node(run_id: str, node_id: str) -> dict[str, Any]:
     status = load_node_status(run_id, node_id)
+    if status.get("status") == "stopped" and status.get("error"):
+        return {"ok": True, "status": complete_stopped_node(run_id, node_id, status.get("endedAt"))}
     if status.get("status") in TERMINAL_NODE_STATES:
         return {"ok": True, "status": status}
     with process_lock:
         process = processes.get((run_id, node_id))
     if process and process.poll() is None:
-        save_node_status(run_id, node_id, {**status, "status": "stopping"})
+        save_node_status(run_id, node_id, {**status, "status": "stopping", "stopRequestedAt": now_iso()})
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-    stopped = {**load_node_status(run_id, node_id), "status": "stopped", "endedAt": now_iso()}
-    save_node_status(run_id, node_id, stopped)
+    stopped = complete_stopped_node(run_id, node_id)
     return {"ok": True, "status": stopped}
 
 
 @app.post("/api/runs/{run_id}/stop")
 def stop_run(run_id: str) -> dict[str, Any]:
     run = load_run(run_id)
-    if run.get("status") == "stopped":
+    if run.get("status") in {"stopped", "terminated"}:
         return {"ok": True, "run": run}
     save_run(run_id, {**run, "status": "stopping"})
     for node in workflow_nodes(run):

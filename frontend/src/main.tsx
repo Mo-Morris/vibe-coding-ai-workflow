@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
+const API_ORIGIN = new URL(API_BASE, window.location.href).origin;
 
 type Page = "runs" | "workflows" | "nodes";
 type WorkflowMode = "auto" | "manual-confirm";
@@ -45,7 +46,18 @@ type NodeStatus = {
   error?: string | null;
   progress?: number;
   hasUi?: boolean;
+  supportsParams?: boolean;
   uiUrl?: string | null;
+};
+
+type NodeProgress = {
+  runId: string;
+  nodeId: string;
+  status: string;
+  progress: number;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  error?: string | null;
 };
 
 type Run = {
@@ -77,6 +89,25 @@ type NodeLogs = {
   stderrOffset: number;
 };
 
+type DataPreview = {
+  nodeId: string;
+  kind: "array" | "object" | "primitive" | "empty";
+  total: number;
+  preview: unknown;
+};
+
+type DataPreviewDialog = {
+  sourceNodeId: string;
+  sourceNodeName: string;
+  data: DataPreview | null;
+  loading: boolean;
+  error: string;
+} | null;
+
+type ImagePreviewDialog = {
+  imageUrl: string;
+} | null;
+
 const emptyDraft: WorkflowDraft = {
   name: "",
   label: "",
@@ -97,7 +128,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function statusLabel(status: string) {
+function runStatusLabel(status: string) {
   const labels: Record<string, string> = {
     pending: "等待",
     running: "运行中",
@@ -106,19 +137,32 @@ function statusLabel(status: string) {
     confirmed: "已确认",
     failed: "失败",
     stopped: "已停止",
+    terminated: "已终止",
     stopping: "停止中",
   };
   return labels[status] ?? status;
 }
 
+function nodeStatusLabel(status: string) {
+  if (status === "stopped") return "已终止";
+  return runStatusLabel(status);
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "";
+  const normalized = value.replace("T", " ");
+  return normalized.length >= 19 ? normalized.slice(0, 19) : normalized;
+}
+
 /** 运行级状态（与后端 run.json 的 status 对齐） */
 const RUN_STATUS_FILTER_OPTIONS: { value: string; label: string }[] = [
-  { value: "pending", label: statusLabel("pending") },
-  { value: "running", label: statusLabel("running") },
-  { value: "success", label: statusLabel("success") },
-  { value: "failed", label: statusLabel("failed") },
-  { value: "stopped", label: statusLabel("stopped") },
-  { value: "stopping", label: statusLabel("stopping") },
+  { value: "pending", label: runStatusLabel("pending") },
+  { value: "running", label: runStatusLabel("running") },
+  { value: "success", label: runStatusLabel("success") },
+  { value: "failed", label: runStatusLabel("failed") },
+  { value: "stopped", label: runStatusLabel("stopped") },
+  { value: "terminated", label: runStatusLabel("terminated") },
+  { value: "stopping", label: runStatusLabel("stopping") },
 ];
 
 type ConfirmDialogProps = {
@@ -589,6 +633,24 @@ function App() {
     });
   }
 
+  async function retryNode(nodeId: string) {
+    if (!selectedRun) return;
+    await withErrorBoundary(async () => {
+      await api(`/api/runs/${selectedRun.id}/nodes/${nodeId}/retry`, { method: "POST" });
+      await refreshRun(selectedRun.id);
+      await refreshLists();
+    }, "节点已重新运行");
+  }
+
+  async function stopNode(nodeId: string) {
+    if (!selectedRun) return;
+    await withErrorBoundary(async () => {
+      await api(`/api/runs/${selectedRun.id}/nodes/${nodeId}/stop`, { method: "POST" });
+      await refreshRun(selectedRun.id);
+      await refreshLists();
+    }, "节点已停止");
+  }
+
   async function stopRun() {
     if (!selectedRun) return;
     await withErrorBoundary(async () => {
@@ -619,38 +681,34 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <a className="brand-logo" href="#/" aria-label="Vibe Coding AI Workflow 首页">
-          <svg viewBox="0 0 246 72" role="img" aria-labelledby="brand-logo-title">
-            <title id="brand-logo-title">Vibe Coding AI Workflow</title>
-            <defs>
-              <linearGradient id="logo-mark-gradient" x1="7" x2="63" y1="8" y2="64" gradientUnits="userSpaceOnUse">
-                <stop stopColor="#5EEAD4" />
-                <stop offset="0.55" stopColor="#60A5FA" />
-                <stop offset="1" stopColor="#A78BFA" />
-              </linearGradient>
-            </defs>
-            <path
-              d="M20 9h32c6.63 0 12 5.37 12 12v30c0 6.63-5.37 12-12 12H20C13.37 63 8 57.63 8 51V21C8 14.37 13.37 9 20 9Z"
-              fill="url(#logo-mark-gradient)"
-            />
-            <path d="M25 23 15 36l10 13" fill="none" stroke="#0F172A" strokeLinecap="round" strokeLinejoin="round" strokeWidth="5" />
-            <path d="M47 23 57 36 47 49" fill="none" stroke="#0F172A" strokeLinecap="round" strokeLinejoin="round" strokeWidth="5" />
-            <path d="M40 20 31 52" fill="none" stroke="#F8FAFC" strokeLinecap="round" strokeWidth="5" />
-            <circle cx="54" cy="18" r="4" fill="#F8FAFC" />
-            <path d="M83 23h19.4l-9.7 27.2L83 23Z" fill="#F8FAFC" />
-            <path d="M104.5 50.2V23h6.2v27.2h-6.2Z" fill="#F8FAFC" />
-            <path d="M117 50.2V23h18.9v5.2h-12.7v5.5h11.4v5h-11.4V45h13.1v5.2H117Z" fill="#F8FAFC" />
-            <path
-              d="M145.7 50.2V23h9.9c8.5 0 14.1 5.4 14.1 13.6 0 8.1-5.6 13.6-14.1 13.6h-9.9Zm6.2-5.3h3.4c5 0 8-3.1 8-8.3 0-5.2-3-8.3-8-8.3h-3.4v16.6Z"
-              fill="#F8FAFC"
-            />
-            <path d="M174.4 50.2V23h6.2v27.2h-6.2Z" fill="#F8FAFC" />
-            <path d="M187.2 50.2V23h5.3l12.3 16.8V23h6v27.2h-5.2l-12.4-16.9v16.9h-6Z" fill="#F8FAFC" />
-            <path d="M216.7 50.2V23h18.8v5.2h-12.6v5.5h11.3v5h-11.3V45H236v5.2h-19.3Z" fill="#F8FAFC" />
-            <text x="84" y="64" fill="#94A3B8" fontFamily="Inter, ui-sans-serif, system-ui" fontSize="9" fontWeight="700" letterSpacing="1.8">
-              AI WORKFLOW
-            </text>
-          </svg>
+        <a className="brand-lockup" href="#/" aria-label="Vibe Coding AI Workflow 首页">
+          <span className="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 72 72" role="img" aria-labelledby="brand-logo-title">
+              <title id="brand-logo-title">Vibe Coding AI Workflow</title>
+              <defs>
+                <linearGradient id="logo-mark-gradient" x1="8" x2="64" y1="8" y2="64" gradientUnits="userSpaceOnUse">
+                  <stop stopColor="#5EEAD4" />
+                  <stop offset="0.55" stopColor="#60A5FA" />
+                  <stop offset="1" stopColor="#A78BFA" />
+                </linearGradient>
+                <linearGradient id="logo-v-gradient" x1="20" x2="52" y1="18" y2="56" gradientUnits="userSpaceOnUse">
+                  <stop stopColor="#F8FAFC" />
+                  <stop offset="1" stopColor="#DFFBFF" />
+                </linearGradient>
+              </defs>
+              <rect x="8" y="8" width="56" height="56" rx="14" fill="url(#logo-mark-gradient)" />
+              <path d="M18 20h10l8 23 8-23h10L41 54H31L18 20Z" fill="#0F172A" opacity="0.9" />
+              <path d="M22 20h8.5L36 40.5 41.5 20H50L39 52H33L22 20Z" fill="url(#logo-v-gradient)" />
+              <path d="M30 20h6l-3.5 13.5L26 20h4Z" fill="#BFF5EF" opacity="0.78" />
+              <circle cx="36" cy="52" r="3.8" fill="#F8FAFC" />
+              <path d="M20 36h8" stroke="#0F172A" strokeLinecap="round" strokeWidth="4" opacity="0.55" />
+              <path d="M44 36h8" stroke="#0F172A" strokeLinecap="round" strokeWidth="4" opacity="0.55" />
+            </svg>
+          </span>
+          <span className="brand-text">
+            <strong>Vibe Coding</strong>
+            <span>AI Workflow</span>
+          </span>
         </a>
 
         <nav className="nav-tabs">
@@ -713,6 +771,8 @@ function App() {
             selectedRun={selectedRun}
             workflows={workflows}
             onConfirmNode={confirmNode}
+            onRetryNode={retryNode}
+            onStopNode={stopNode}
             onRequestDeleteRun={openRunDeleteDialog}
             onDeleteRun={() => {
               if (selectedRun) openRunDeleteDialog(selectedRun);
@@ -1105,6 +1165,8 @@ type RunConsoleProps = {
   selectedRun: Run | null;
   workflows: Workflow[];
   onConfirmNode: (nodeId: string) => void;
+  onRetryNode: (nodeId: string) => void;
+  onStopNode: (nodeId: string) => void;
   onRequestDeleteRun: (run: Pick<Run, "id" | "workflowLabel">) => void;
   onDeleteRun: () => void;
   onStopRun: () => void;
@@ -1113,12 +1175,95 @@ type RunConsoleProps = {
   onViewWorkflow: (name: string) => void;
 };
 
+function formatPreviewValue(value: unknown) {
+  return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+function DataTransferIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 7h10" />
+      <path d="m11 4 3 3-3 3" />
+      <path d="M20 17H10" />
+      <path d="m13 14-3 3 3 3" />
+    </svg>
+  );
+}
+
+function DataPreviewModal({ dialog, onClose }: { dialog: DataPreviewDialog; onClose: () => void }) {
+  if (!dialog) return null;
+  const { data } = dialog;
+  const previewItems = data?.kind === "array" && Array.isArray(data.preview) ? data.preview : [];
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal-dialog data-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="data-preview-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">Data Transfer</p>
+            <h2 id="data-preview-title">{dialog.sourceNodeId} 返回数据</h2>
+            <p className="muted">{dialog.sourceNodeName}</p>
+          </div>
+          <button className="secondary-button" onClick={onClose}>关闭</button>
+        </div>
+        <div className="modal-body">
+          {dialog.loading && <p className="muted">正在读取上个节点返回的数据...</p>}
+          {dialog.error && <p className="error-text">{dialog.error}</p>}
+          {!dialog.loading && !dialog.error && data?.kind === "empty" && <p className="muted">暂无数据。</p>}
+          {!dialog.loading && !dialog.error && data?.kind === "array" && (
+            <div className="data-preview-stack">
+              <div className="data-preview-summary">
+                已展示 {previewItems.length} / 共 {data.total} 条
+              </div>
+              {previewItems.map((item, index) => (
+                <article className="data-preview-item" key={index}>
+                  <span>#{index + 1}</span>
+                  <pre>{formatPreviewValue(item)}</pre>
+                </article>
+              ))}
+            </div>
+          )}
+          {!dialog.loading && !dialog.error && data && data.kind !== "empty" && data.kind !== "array" && (
+            <pre className="data-preview-json">{formatPreviewValue(data.preview)}</pre>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ImagePreviewModal({ dialog, onClose }: { dialog: ImagePreviewDialog; onClose: () => void }) {
+  useEffect(() => {
+    if (!dialog) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dialog, onClose]);
+
+  if (!dialog) return null;
+
+  return (
+    <div className="image-preview-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label="原图预览" onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" className="image-preview-close" onClick={onClose} aria-label="关闭预览">
+          关闭
+        </button>
+        <img className="image-preview-full" src={dialog.imageUrl} alt="放大原图" />
+      </section>
+    </div>
+  );
+}
+
 function RunConsoleView({
   busy,
   runs,
   selectedRun,
   workflows,
   onConfirmNode,
+  onRetryNode,
+  onStopNode,
   onRequestDeleteRun,
   onDeleteRun,
   onStopRun,
@@ -1135,10 +1280,14 @@ function RunConsoleView({
     stderrOffset: 0,
   });
   const [logError, setLogError] = useState("");
+  const [selectedNodeProgress, setSelectedNodeProgress] = useState<NodeProgress | null>(null);
+  const [progressError, setProgressError] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
   const [filterWorkflowName, setFilterWorkflowName] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [dataPreviewDialog, setDataPreviewDialog] = useState<DataPreviewDialog>(null);
+  const [imagePreviewDialog, setImagePreviewDialog] = useState<ImagePreviewDialog>(null);
 
   const sortedWorkflowOptions = useMemo(
     () => [...workflows].sort((a, b) => a.name.localeCompare(b.name)),
@@ -1174,6 +1323,55 @@ function RunConsoleView({
     setFilterWorkflowName("");
     setFilterStatus("");
   }
+
+  async function openDataPreview(sourceNode: WorkflowNode) {
+    if (!selectedRun) return;
+    setDataPreviewDialog({
+      sourceNodeId: sourceNode.id,
+      sourceNodeName: sourceNode.node,
+      data: null,
+      loading: true,
+      error: "",
+    });
+    try {
+      const data = await api<DataPreview>(`/api/runs/${selectedRun.id}/nodes/${sourceNode.id}/data-preview`);
+      setDataPreviewDialog({
+        sourceNodeId: sourceNode.id,
+        sourceNodeName: sourceNode.node,
+        data,
+        loading: false,
+        error: "",
+      });
+    } catch (err) {
+      setDataPreviewDialog({
+        sourceNodeId: sourceNode.id,
+        sourceNodeName: sourceNode.node,
+        data: null,
+        loading: false,
+        error: err instanceof Error ? err.message : "数据读取失败",
+      });
+    }
+  }
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== API_ORIGIN) return;
+      const message = event.data;
+      if (!message || typeof message !== "object" || message.type !== "vcaw:image-preview") return;
+      if (typeof message.imageUrl !== "string" || !message.imageUrl.trim()) return;
+
+      setImagePreviewDialog({ imageUrl: message.imageUrl });
+      if (event.source) {
+        (event.source as Window).postMessage(
+          { type: "vcaw:image-preview:handled", requestId: message.requestId },
+          event.origin,
+        );
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
 
   useEffect(() => {
     if (!selectedRun) {
@@ -1237,6 +1435,37 @@ function RunConsoleView({
     };
   }, [selectedNodeId, selectedRun?.id]);
 
+  useEffect(() => {
+    if (!selectedRun || !selectedNodeId) {
+      setSelectedNodeProgress(null);
+      setProgressError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadProgress() {
+      try {
+        const progress = await api<NodeProgress>(`/api/runs/${selectedRun!.id}/nodes/${selectedNodeId}/progress`);
+        if (!cancelled) {
+          setSelectedNodeProgress(progress);
+          setProgressError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setProgressError(err instanceof Error ? err.message : "进度读取失败");
+        }
+      }
+    }
+
+    void loadProgress();
+    const timer = window.setInterval(loadProgress, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedNodeId, selectedRun?.id]);
+
   if (selectedRun) {
     const selectedWorkflowNode = selectedRun.workflow.nodes.find((node) => node.id === selectedNodeId) ?? selectedRun.workflow.nodes[0];
     const selectedStatus = selectedWorkflowNode ? selectedRun.nodeStatuses?.[selectedWorkflowNode.id] : undefined;
@@ -1245,9 +1474,25 @@ function RunConsoleView({
       : -1;
     const isLastWorkflowNode = selectedNodeIndex === selectedRun.workflow.nodes.length - 1;
     const selectedLogText = selectedNodeLogs.combined || "暂无运行日志。";
+    const selectedNodeStatus = selectedStatus?.status ?? "pending";
+    const selectedNodeSupportsParams = Boolean(selectedStatus?.supportsParams);
+    const selectedProgress = selectedNodeProgress?.nodeId === selectedWorkflowNode?.id
+      ? selectedNodeProgress
+      : selectedStatus;
+    const selectedProgressValue = Math.max(0, Math.min(100, Math.round(Number(selectedProgress?.progress ?? 0))));
+    const selectedNodeUiVersion = [
+      selectedWorkflowNode?.id,
+      selectedNodeStatus,
+      selectedStatus?.startedAt,
+      selectedStatus?.endedAt,
+    ].filter(Boolean).join(":");
+    const canStopSelectedNode = selectedNodeStatus === "waiting-confirmation" || (selectedNodeSupportsParams && ["running", "stopping"].includes(selectedNodeStatus));
+    const canRetrySelectedNode = ["failed", "stopped"].includes(selectedNodeStatus);
 
     return (
       <section className="run-detail-page">
+        <DataPreviewModal dialog={dataPreviewDialog} onClose={() => setDataPreviewDialog(null)} />
+        <ImagePreviewModal dialog={imagePreviewDialog} onClose={() => setImagePreviewDialog(null)} />
         <div className="section-header">
           <div>
             <p className="eyebrow">Run Detail</p>
@@ -1257,34 +1502,50 @@ function RunConsoleView({
           <div className="actions">
             <button className="secondary-button" onClick={onViewRunList} disabled={busy}>返回运行记录</button>
             <button onClick={() => onViewWorkflow(selectedRun.workflowName)} disabled={busy}>工作流定义</button>
-            <button className="danger-button" onClick={onStopRun} disabled={busy || selectedRun.status === "stopped"}>停止</button>
+            <button className="danger-button" onClick={onStopRun} disabled={busy || ["stopped", "terminated"].includes(selectedRun.status)}>停止工作流</button>
             <button className="danger-button" onClick={onDeleteRun} disabled={busy}>删除</button>
           </div>
         </div>
 
         <div className="run-detail-meta">
           <span>{selectedRun.mode}</span>
-          <span>开始：{selectedRun.startedAt}</span>
-          {selectedRun.endedAt && <span>结束：{selectedRun.endedAt}</span>}
+          <span>开始：{formatDateTime(selectedRun.startedAt)}</span>
+          {selectedRun.endedAt && <span>结束：{formatDateTime(selectedRun.endedAt)}</span>}
         </div>
 
         <div className="run-workspace">
           <aside className="run-node-rail" aria-label="运行节点">
             {selectedRun.workflow.nodes.map((node, index) => {
               const status = selectedRun.nodeStatuses?.[node.id];
+              const previousNode = selectedRun.workflow.nodes[index - 1];
               return (
-                <button
-                  className={`run-step ${selectedNodeId === node.id ? "active" : ""}`}
-                  key={node.id}
-                  onClick={() => setSelectedNodeId(node.id)}
-                  disabled={busy}
-                >
-                  <span>
-                    Step {index + 1} {node.id}
-                    <em>{statusLabel(status?.status ?? "pending")}</em>
-                  </span>
-                  <small>{node.node}</small>
-                </button>
+                <React.Fragment key={node.id}>
+                  {previousNode && (
+                    <div className="run-data-transfer">
+                      <button
+                        type="button"
+                        className="run-data-transfer-button"
+                        onClick={() => openDataPreview(previousNode)}
+                        disabled={busy}
+                        aria-label={`查看 ${previousNode.id} 返回数据`}
+                        title={`查看 ${previousNode.id} 返回数据`}
+                      >
+                        <DataTransferIcon />
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    className={`run-step ${selectedNodeId === node.id ? "active" : ""}`}
+                    onClick={() => setSelectedNodeId(node.id)}
+                    disabled={busy}
+                  >
+                    <span>
+                      Step {index + 1} {node.id}
+                      <em>{nodeStatusLabel(status?.status ?? "pending")}</em>
+                    </span>
+                    <small>{node.node}</small>
+                  </button>
+                </React.Fragment>
               );
             })}
           </aside>
@@ -1296,6 +1557,16 @@ function RunConsoleView({
                   <div>
                     <h3>{selectedWorkflowNode.id}</h3>
                     <p className="muted">{selectedWorkflowNode.node}</p>
+                    <div className="node-progress" aria-label={`节点进度 ${selectedProgressValue}%`}>
+                      <div className="node-progress-meta">
+                        <span>{nodeStatusLabel(selectedProgress?.status ?? selectedNodeStatus)}</span>
+                        <strong>{selectedProgressValue}%</strong>
+                      </div>
+                      <div className="node-progress-track" aria-hidden>
+                        <span style={{ width: `${selectedProgressValue}%` }} />
+                      </div>
+                      {progressError && <p className="error-text">{progressError}</p>}
+                    </div>
                   </div>
                   <div className="node-actions">
                     {selectedStatus?.status === "waiting-confirmation" && (
@@ -1303,17 +1574,25 @@ function RunConsoleView({
                         {isLastWorkflowNode ? "确认完成" : "确认继续"}
                       </button>
                     )}
+                    {canStopSelectedNode && (
+                      <button className="danger-button" onClick={() => onStopNode(selectedWorkflowNode.id)} disabled={busy}>
+                        停止节点
+                      </button>
+                    )}
+                    {canRetrySelectedNode && (
+                      <button className="primary-button" onClick={() => onRetryNode(selectedWorkflowNode.id)} disabled={busy}>
+                        重新运行
+                      </button>
+                    )}
                   </div>
                 </div>
-
-                {selectedStatus?.error && <p className="error-text">{selectedStatus.error}</p>}
-
                 <div className="node-runtime-stack">
                   {selectedStatus?.hasUi && (
                     <iframe
+                      key={selectedNodeUiVersion}
                       className="node-ui-frame"
                       title={`${selectedWorkflowNode.id} UI`}
-                      src={`${API_BASE}${selectedStatus.uiUrl}`}
+                      src={`${API_BASE}${selectedStatus.uiUrl}?v=${encodeURIComponent(selectedNodeUiVersion)}`}
                     />
                   )}
                   <div className="node-console-wrap">
@@ -1388,12 +1667,12 @@ function RunConsoleView({
           {filteredRuns.map((run) => (
             <article className="run-row" key={run.id}>
               <button className="run-row-main" onClick={() => onViewRun(run.id)} disabled={busy}>
-                <span className={`status ${run.status}`}>{statusLabel(run.status)}</span>
+                <span className={`status ${run.status}`}>{runStatusLabel(run.status)}</span>
                 <span>
                   <strong>{run.workflowLabel}</strong>
                   <small>{run.id}</small>
                 </span>
-                <span className="run-time">{run.startedAt}</span>
+                <span className="run-time">{formatDateTime(run.startedAt)}</span>
               </button>
               <div className="workflow-row-actions">
                 <button onClick={() => onViewRun(run.id)} disabled={busy}>查看节点状态</button>
