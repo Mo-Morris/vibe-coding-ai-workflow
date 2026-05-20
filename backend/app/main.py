@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ from re import fullmatch
 from typing import Any
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +24,7 @@ REPO_DIR = Path(__file__).resolve().parents[2]
 NODES_DIR = Path(os.getenv("VCAW_NODES_DIR", REPO_DIR / "examples" / "nodes")).resolve()
 WORKFLOWS_DIR = Path(os.getenv("VCAW_WORKFLOWS_DIR", REPO_DIR / "examples" / "workflows")).resolve()
 RUNS_DIR = Path(os.getenv("VCAW_RUNS_DIR", REPO_DIR / "data" / "runs")).resolve()
+NODE_DEFAULTS_DIR = Path(os.getenv("VCAW_NODE_DEFAULTS_DIR", REPO_DIR / "data" / "node-defaults")).resolve()
 
 TERMINAL_NODE_STATES = {"success", "confirmed", "failed", "skipped", "stopped"}
 ACTIVE_NODE_STATES = {"pending", "running", "stopping", "waiting-confirmation"}
@@ -52,7 +54,6 @@ class WorkflowNodeRequest(BaseModel):
 
 class CreateWorkflowRequest(BaseModel):
     name: str
-    label: str = ""
     description: str = ""
     mode: str = "manual-confirm"
     nodes: list[WorkflowNodeRequest]
@@ -78,6 +79,7 @@ class SearchRequest(BaseModel):
 
 
 DATA_PREVIEW_LIMIT = 5
+VALIDATION_INPUT_NODE_ID = "validation-input"
 
 
 def now_iso() -> str:
@@ -120,12 +122,52 @@ def safe_filename(filename: str) -> str:
     return safe[:160]
 
 
+def make_workflow_id() -> str:
+    for _ in range(10):
+        workflow_name = f"wf-{secrets.token_hex(8)}"
+        if not (WORKFLOWS_DIR / workflow_name / "workflow.md").exists():
+            return workflow_name
+    raise HTTPException(status_code=500, detail="Could not allocate workflow id")
+
+
 def node_definition(node_name: str) -> tuple[Path, dict[str, Any]]:
     node_dir = NODES_DIR / node_name
     node_file = node_dir / "node.md"
     if not node_file.exists():
         raise HTTPException(status_code=404, detail=f"Node not found: {node_name}")
     return node_dir, read_yaml(node_file)
+
+
+def node_definition_response(node_name: str, node_dir: Path, definition: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **definition,
+        "path": str(node_dir),
+        "healthcheckUrl": f"/api/nodes/{node_name}/healthcheck",
+    }
+
+
+def node_default_params_path(node_name: str) -> Path:
+    return NODE_DEFAULTS_DIR / f"{validate_slug(node_name, 'node name')}.json"
+
+
+def load_node_default_params(node_name: str) -> dict[str, Any]:
+    params = read_json(node_default_params_path(node_name), {})
+    return params if isinstance(params, dict) else {}
+
+
+def save_node_default_params(node_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Default params must be a JSON object")
+    write_json(node_default_params_path(node_name), params)
+    return params
+
+
+def apply_node_default_params(run_id: str, node_id: str) -> None:
+    run = load_run(run_id)
+    workflow_node = find_workflow_node(run, node_id)
+    params = load_node_default_params(workflow_node["node"])
+    if params:
+        write_json(node_run_dir(run_id, node_id) / "data" / "params.json", params)
 
 
 def workflow_definition(workflow_name: str) -> tuple[Path, dict[str, Any]]:
@@ -320,8 +362,160 @@ def make_run_id(workflow_name: str) -> str:
     return candidate
 
 
+def make_validation_run_id(node_name: str) -> str:
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    base = f"{stamp}-validate-{node_name}"
+    candidate = base
+    suffix = 2
+    while (RUNS_DIR / candidate).exists():
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def validation_workflow(node_name: str, has_input: bool) -> dict[str, Any]:
+    node = {
+        "id": node_name,
+        "node": node_name,
+        "depends_on": [VALIDATION_INPUT_NODE_ID] if has_input else [],
+    }
+    return {
+        "name": f"validate-{node_name}",
+        "label": f"{node_name} 立即运行",
+        "description": "单节点立即运行",
+        "mode": "manual-confirm",
+        "nodes": [node],
+    }
+
+
+def save_validation_workflow(run_id: str, node_name: str, has_input: bool) -> None:
+    workflow = validation_workflow(node_name, has_input)
+    current_run_dir = run_dir(run_id)
+    write_json(current_run_dir / "run.json", {**load_run(run_id), "workflow": workflow})
+    (current_run_dir / "workflow.md").write_text(yaml.safe_dump(workflow, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def build_node_command(command: str, action: str, args: list[str]) -> list[str]:
     return [*shlex.split(command), action, *args]
+
+
+def output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def run_node_healthcheck(node_name: str, timeout: float = 1.0) -> dict[str, Any]:
+    node_name = validate_slug(node_name, "node name")
+    source_node_dir, node_def = node_definition(node_name)
+    command = build_node_command(node_def["command"], "healthcheck", ["--node-dir", str(source_node_dir)])
+    timeout = max(0.001, timeout)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=source_node_dir,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "node": node_name,
+            "status": "timeout",
+            "timeout": timeout,
+            "command": shlex.join(command),
+            "stdout": output_text(exc.stdout).strip(),
+            "stderr": output_text(exc.stderr).strip(),
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "node": node_name,
+            "status": "start_failed",
+            "timeout": timeout,
+            "command": shlex.join(command),
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    payload: Any
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        payload = {"message": stdout}
+    return {
+        "ok": completed.returncode == 0 and (not isinstance(payload, dict) or payload.get("ok") is not False),
+        "node": node_name,
+        "status": "healthy" if completed.returncode == 0 else "failed",
+        "timeout": timeout,
+        "command": shlex.join(command),
+        "exitCode": completed.returncode,
+        "result": payload,
+        "stderr": stderr,
+    }
+
+
+def resolve_command_executable(command: list[str], cwd: Path) -> Path | str:
+    if not command:
+        return "<empty command>"
+    executable = command[0]
+    if "/" in executable:
+        return (cwd / executable).resolve() if not Path(executable).is_absolute() else Path(executable)
+    found = shutil.which(executable)
+    return Path(found) if found else f"<not found in PATH: {executable}>"
+
+
+def command_diagnostics(run_id: str, node_id: str, action: str, command: list[str], cwd: Path, stdout_path: Path, stderr_path: Path) -> str:
+    resolved = resolve_command_executable(command, cwd)
+    exists = resolved.exists() if isinstance(resolved, Path) else False
+    executable = os.access(resolved, os.X_OK) if isinstance(resolved, Path) else False
+    return "\n".join(
+        [
+            "节点命令诊断:",
+            f"  run_id: {run_id}",
+            f"  node_id: {node_id}",
+            f"  action: {action}",
+            f"  cwd: {cwd}",
+            f"  command: {shlex.join(command)}",
+            f"  resolved_executable: {resolved}",
+            f"  executable_exists: {exists}",
+            f"  executable_can_run: {executable}",
+            f"  stdout_log: {stdout_path}",
+            f"  stderr_log: {stderr_path}",
+            f"  PATH: {os.getenv('PATH', '')}",
+        ]
+    )
+
+
+def write_command_diagnostics(stderr: Any, message: str) -> None:
+    stderr.write(message)
+    stderr.write("\n\n")
+    stderr.flush()
+
+
+def log_command_start_failure(stderr: Any, exc: BaseException) -> None:
+    stderr.write("节点命令启动失败:\n")
+    stderr.write(f"  exception_type: {type(exc).__name__}\n")
+    stderr.write(f"  message: {exc}\n")
+    stderr.flush()
+
+
+def node_process_error_message(return_code: int, run_id: str, node_id: str) -> str:
+    stderr_path = node_run_dir(run_id, node_id) / "logs" / "stderr.log"
+    stdout_path = node_run_dir(run_id, node_id) / "logs" / "stdout.log"
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip() if stderr_path.exists() else ""
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace").strip() if stdout_path.exists() else ""
+    detail = stderr_text or stdout_text
+    if len(detail) > 4000:
+        detail = detail[-4000:]
+    if detail:
+        return f"Process exited with {return_code}\n\n{detail}"
+    return f"Process exited with {return_code}"
 
 
 def run_node_command(
@@ -351,9 +545,32 @@ def run_node_command(
     )
 
     if capture_json:
-        completed = subprocess.run(command, cwd=source_node_dir, text=True, capture_output=True, check=False)
+        try:
+            completed = subprocess.run(command, cwd=source_node_dir, text=True, capture_output=True, check=False)
+        except OSError as exc:
+            stdout_path = current_node_dir / "logs" / "stdout.log"
+            stderr_path = current_node_dir / "logs" / "stderr.log"
+            detail = "\n".join(
+                [
+                    command_diagnostics(run_id, node_id, action, command, source_node_dir, stdout_path, stderr_path),
+                    "节点命令启动失败:",
+                    f"  exception_type: {type(exc).__name__}",
+                    f"  message: {exc}",
+                ]
+            )
+            raise HTTPException(status_code=500, detail=detail) from exc
         if completed.returncode != 0:
-            raise HTTPException(status_code=500, detail=completed.stderr or completed.stdout or "Node command failed")
+            detail = "\n".join(
+                [
+                    command_diagnostics(run_id, node_id, action, command, source_node_dir, current_node_dir / "logs" / "stdout.log", current_node_dir / "logs" / "stderr.log"),
+                    f"节点命令退出码: {completed.returncode}",
+                    "stderr:",
+                    completed.stderr.strip() or "<empty>",
+                    "stdout:",
+                    completed.stdout.strip() or "<empty>",
+                ]
+            )
+            raise HTTPException(status_code=500, detail=detail)
         try:
             return json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -364,7 +581,12 @@ def run_node_command(
     stdout_path = logs_dir / "stdout.log"
     stderr_path = logs_dir / "stderr.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        process = subprocess.Popen(command, cwd=source_node_dir, stdout=stdout, stderr=stderr, text=True)
+        write_command_diagnostics(stderr, command_diagnostics(run_id, node_id, action, command, source_node_dir, stdout_path, stderr_path))
+        try:
+            process = subprocess.Popen(command, cwd=source_node_dir, stdout=stdout, stderr=stderr, text=True)
+        except OSError as exc:
+            log_command_start_failure(stderr, exc)
+            return 127
         with process_lock:
             processes[(run_id, node_id)] = process
         return_code = process.wait()
@@ -415,7 +637,16 @@ def run_node_command_logged_json(
     stdout_path = logs_dir / "stdout.log"
     stderr_path = logs_dir / "stderr.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        process = subprocess.Popen(command, cwd=source_node_dir, stdout=stdout, stderr=stderr, text=True)
+        write_command_diagnostics(stderr, command_diagnostics(run_id, node_id, action, command, source_node_dir, stdout_path, stderr_path))
+        try:
+            process = subprocess.Popen(command, cwd=source_node_dir, stdout=stdout, stderr=stderr, text=True)
+        except OSError as exc:
+            log_command_start_failure(stderr, exc)
+            detail = command_diagnostics(run_id, node_id, action, command, source_node_dir, stdout_path, stderr_path)
+            raise HTTPException(
+                status_code=500,
+                detail=f"{detail}\n\n节点命令启动失败:\n  exception_type: {type(exc).__name__}\n  message: {exc}",
+            ) from exc
         with process_lock:
             processes[(run_id, node_id)] = process
         return_code = process.wait()
@@ -461,6 +692,8 @@ def execute_from_node(run_id: str, start_node_id: str) -> None:
             "run",
             ["--workflow-file", str(run_dir(run_id) / "workflow.md")],
         )
+        if return_code == 0:
+            apply_node_default_params(run_id, node_id)
 
         status = load_node_status(run_id, node_id)
         if status.get("status") == "stopped":
@@ -469,7 +702,7 @@ def execute_from_node(run_id: str, start_node_id: str) -> None:
             save_node_status(
                 run_id,
                 node_id,
-                {**status, "status": "failed", "endedAt": now_iso(), "error": f"Process exited with {return_code}"},
+                {**status, "status": "failed", "endedAt": now_iso(), "error": node_process_error_message(return_code, run_id, node_id)},
             )
             save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": now_iso()})
             return
@@ -501,7 +734,8 @@ def list_nodes() -> dict[str, Any]:
     for node_file in NODES_DIR.glob("*/node.md"):
         node_dir = node_file.parent
         definition = read_yaml(node_file)
-        nodes.append({**definition, "path": str(node_dir)})
+        node_name = str(definition.get("name") or node_dir.name)
+        nodes.append(node_definition_response(node_name, node_dir, definition))
     return {"nodes": nodes}
 
 
@@ -510,7 +744,78 @@ def get_node_definition(node_name: str) -> dict[str, Any]:
     node_name = validate_slug(node_name, "node name")
     node_dir, definition = node_definition(node_name)
     node_file = node_dir / "node.md"
-    return {**definition, "path": str(node_dir), "definitionPath": str(node_file), "rawDefinition": node_file.read_text(encoding="utf-8")}
+    return {
+        **node_definition_response(node_name, node_dir, definition),
+        "definitionPath": str(node_file),
+        "rawDefinition": node_file.read_text(encoding="utf-8"),
+    }
+
+
+@app.post("/api/nodes/{node_name}/healthcheck")
+def healthcheck_node(node_name: str, timeout: float = Query(1.0, gt=0, le=30)) -> dict[str, Any]:
+    return run_node_healthcheck(node_name, timeout)
+
+
+@app.get("/api/nodes/{node_name}/default-params")
+def get_node_default_params(node_name: str) -> dict[str, Any]:
+    node_name = validate_slug(node_name, "node name")
+    node_definition(node_name)
+    return {"ok": True, "node": node_name, "params": load_node_default_params(node_name)}
+
+
+@app.put("/api/nodes/{node_name}/default-params")
+def put_node_default_params(node_name: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    node_name = validate_slug(node_name, "node name")
+    _, node_def = node_definition(node_name)
+    if not node_def.get("capabilities", {}).get("params"):
+        raise HTTPException(status_code=409, detail="Node does not support params")
+    saved = save_node_default_params(node_name, payload)
+    return {"ok": True, "node": node_name, "params": saved}
+
+
+@app.post("/api/nodes/{node_name}/validations")
+def create_node_validation(node_name: str, background_tasks: BackgroundTasks, payload: Any = None) -> dict[str, Any]:
+    node_name = validate_slug(node_name, "node name")
+    _, node_def = node_definition(node_name)
+    if payload is None and "validationInputExample" in node_def:
+        payload = node_def.get("validationInputExample")
+    has_input = payload is not None
+    workflow = validation_workflow(node_name, has_input)
+    run_id = make_validation_run_id(node_name)
+    current_run_dir = RUNS_DIR / run_id
+    current_run_dir.mkdir(parents=True, exist_ok=True)
+    (current_run_dir / "workflow.md").write_text(yaml.safe_dump(workflow, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    started_at = now_iso()
+    run = {
+        "id": run_id,
+        "kind": "node-validation",
+        "workflowName": workflow["name"],
+        "workflowLabel": workflow["label"],
+        "mode": workflow["mode"],
+        "status": "pending",
+        "currentNodeId": node_name,
+        "startedAt": started_at,
+        "endedAt": None,
+        "input": {},
+        "workflow": workflow,
+    }
+    write_json(current_run_dir / "run.json", run)
+
+    current_node_dir = current_run_dir / "nodes" / node_name
+    (current_node_dir / "data").mkdir(parents=True, exist_ok=True)
+    (current_node_dir / "logs").mkdir(parents=True, exist_ok=True)
+    write_json(
+        current_node_dir / "status.json",
+        {"id": node_name, "node": node_name, "status": "pending", "startedAt": None, "endedAt": None, "error": None, "progress": 0},
+    )
+    if has_input:
+        input_dir = current_run_dir / "nodes" / VALIDATION_INPUT_NODE_ID / "data"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        write_json(input_dir / "data.json", payload)
+
+    schedule_from(run_id, node_name, background_tasks)
+    return {"runId": run_id, "nodeId": node_name, "run": get_run(run_id)}
 
 
 @app.get("/api/workflows")
@@ -524,7 +829,10 @@ def list_workflows() -> dict[str, Any]:
 
 @app.post("/api/workflows")
 def create_workflow(request: CreateWorkflowRequest) -> dict[str, Any]:
-    workflow_name = validate_slug(request.name.strip(), "workflow name")
+    workflow_label = request.name.strip()
+    if not workflow_label:
+        raise HTTPException(status_code=400, detail="workflow name is required")
+    workflow_name = make_workflow_id()
     if request.mode not in {"auto", "manual-confirm"}:
         raise HTTPException(status_code=400, detail="mode must be auto or manual-confirm")
     if not request.nodes:
@@ -555,7 +863,7 @@ def create_workflow(request: CreateWorkflowRequest) -> dict[str, Any]:
 
     workflow = {
         "name": workflow_name,
-        "label": request.label.strip() or workflow_name,
+        "label": workflow_label,
         "description": request.description.strip(),
         "mode": request.mode,
         "nodes": workflow_nodes_payload,
@@ -624,6 +932,8 @@ def list_runs() -> dict[str, Any]:
     for run_json in sorted(RUNS_DIR.glob("*/run.json"), reverse=True):
         run = read_json(run_json, {})
         if run.get("id"):
+            if run.get("kind") == "node-validation":
+                continue
             run = run_with_aggregate_status(run["id"], run)
         runs.append(run)
     return {"runs": runs}
@@ -663,7 +973,11 @@ def get_node_progress(run_id: str, node_id: str) -> dict[str, Any]:
     run = load_run(run_id)
     find_workflow_node(run, node_id)
     status = effective_node_status(run, node_id, load_node_status(run_id, node_id))
+    detail = read_json(node_run_dir(run_id, node_id) / "data" / "progress.json", {})
+    if not isinstance(detail, dict):
+        detail = {}
     return {
+        **detail,
         "runId": run_id,
         "nodeId": node_id,
         "status": status.get("status", "pending"),
@@ -679,11 +993,57 @@ def get_node_result(run_id: str, node_id: str) -> dict[str, Any]:
     return read_json(node_run_dir(run_id, node_id) / "result.json", {})
 
 
+@app.get("/api/runs/{run_id}/nodes/{node_id}/params")
+def get_node_params(run_id: str, node_id: str) -> dict[str, Any]:
+    workflow_node = find_workflow_node(load_run(run_id), node_id)
+    params = read_json(node_run_dir(run_id, node_id) / "data" / "params.json", {})
+    if not isinstance(params, dict) or not params:
+        params = load_node_default_params(workflow_node["node"])
+    return params if isinstance(params, dict) else {}
+
+
+@app.put("/api/runs/{run_id}/nodes/{node_id}/default-params")
+def save_run_node_params_as_default(run_id: str, node_id: str, payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    workflow_node, _, node_def = current_node_definition(run_id, node_id)
+    if not node_def.get("capabilities", {}).get("params"):
+        raise HTTPException(status_code=409, detail="Node does not support params")
+    params = payload if isinstance(payload, dict) and payload else read_json(node_run_dir(run_id, node_id) / "data" / "params.json", {})
+    if not isinstance(params, dict) or not params:
+        raise HTTPException(status_code=400, detail="No params found for this node run")
+    saved = save_node_default_params(workflow_node["node"], params)
+    return {"ok": True, "node": workflow_node["node"], "runId": run_id, "nodeId": node_id, "params": saved}
+
+
 @app.get("/api/runs/{run_id}/nodes/{node_id}/data-preview")
 def get_node_data_preview(run_id: str, node_id: str) -> dict[str, Any]:
     find_workflow_node(load_run(run_id), node_id)
     data = read_json(node_run_dir(run_id, node_id) / "data" / "data.json", None)
     return data_preview_response(node_id, data)
+
+
+@app.get("/api/runs/{run_id}/validation-input")
+def get_validation_input(run_id: str) -> dict[str, Any]:
+    run = load_run(run_id)
+    if run.get("kind") != "node-validation":
+        raise HTTPException(status_code=404, detail="Validation run not found")
+    data = read_json(run_dir(run_id) / "nodes" / VALIDATION_INPUT_NODE_ID / "data" / "data.json", None)
+    return {"runId": run_id, "nodeId": VALIDATION_INPUT_NODE_ID, "input": data}
+
+
+@app.put("/api/runs/{run_id}/validation-input")
+def put_validation_input(run_id: str, payload: Any = Body(...)) -> dict[str, Any]:
+    run = load_run(run_id)
+    if run.get("kind") != "node-validation":
+        raise HTTPException(status_code=404, detail="Validation run not found")
+    nodes = workflow_nodes(run)
+    if len(nodes) != 1:
+        raise HTTPException(status_code=409, detail="Validation run must contain exactly one node")
+    node_name = nodes[0]["node"]
+    input_dir = run_dir(run_id) / "nodes" / VALIDATION_INPUT_NODE_ID / "data"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    write_json(input_dir / "data.json", payload)
+    save_validation_workflow(run_id, node_name, has_input=True)
+    return {"ok": True, "run": get_run(run_id), "input": payload}
 
 
 @app.get("/api/runs/{run_id}/nodes/{node_id}/context")
@@ -700,8 +1060,20 @@ def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
         "status": status.get("status"),
         "capabilities": node_def.get("capabilities", {}),
         "resultUrl": f"/api/runs/{run_id}/nodes/{node_id}/result",
+        "healthcheckUrl": f"/api/runs/{run_id}/nodes/{node_id}/healthcheck",
         "uploadUrl": f"/api/runs/{run_id}/nodes/{node_id}/upload",
         "uploads": read_json(node_run_dir(run_id, node_id) / "data" / "uploads.json", []),
+    }
+
+
+@app.post("/api/runs/{run_id}/nodes/{node_id}/healthcheck")
+def healthcheck_run_node(run_id: str, node_id: str, timeout: float = Query(1.0, gt=0, le=30)) -> dict[str, Any]:
+    run = load_run(run_id)
+    workflow_node = find_workflow_node(run, node_id)
+    return {
+        **run_node_healthcheck(workflow_node["node"], timeout),
+        "runId": run_id,
+        "nodeId": node_id,
     }
 
 
@@ -732,7 +1104,7 @@ def get_node_logs(
     return {
         "stdout": stdout,
         "stderr": stderr,
-        "combined": "\n".join(part for part in [stdout.strip(), stderr.strip()] if part),
+        "combined": "\n".join(part for part in [stderr.strip(), stdout.strip()] if part),
         "stdoutOffset": stdout_offset,
         "stderrOffset": stderr_offset,
     }
@@ -914,9 +1286,10 @@ def retry_node(run_id: str, node_id: str, background_tasks: BackgroundTasks) -> 
         return_code = run_node_command(run_id, node_id, "run", ["--workflow-file", str(run_dir(run_id) / "workflow.md")])
         ended_at = now_iso()
         if return_code != 0:
-            save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": f"Process exited with {return_code}"})
+            save_node_status(run_id, node_id, {**load_node_status(run_id, node_id), "status": "failed", "endedAt": ended_at, "error": node_process_error_message(return_code, run_id, node_id)})
             save_run(run_id, {**load_run(run_id), "status": "failed", "endedAt": ended_at})
             return {"ok": False, "error": {"code": "NODE_INIT_FAILED", "message": "Node initialization failed"}}
+        apply_node_default_params(run_id, node_id)
         save_node_status(
             run_id,
             node_id,

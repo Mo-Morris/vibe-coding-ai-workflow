@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -27,7 +27,9 @@ type NodeDefinition = {
   name: string;
   label?: string;
   description?: string;
+  tags?: string[];
   command?: string;
+  validationInputExample?: unknown;
   ui?: {
     entry?: string;
   };
@@ -62,6 +64,7 @@ type NodeProgress = {
 
 type Run = {
   id: string;
+  kind?: string;
   workflowName: string;
   workflowLabel: string;
   mode: WorkflowMode;
@@ -75,7 +78,6 @@ type Run = {
 
 type WorkflowDraft = {
   name: string;
-  label: string;
   description: string;
   mode: WorkflowMode;
   nodes: WorkflowNode[];
@@ -96,6 +98,12 @@ type DataPreview = {
   preview: unknown;
 };
 
+type ValidationInput = {
+  runId: string;
+  nodeId: string;
+  input: unknown;
+};
+
 type DataPreviewDialog = {
   sourceNodeId: string;
   sourceNodeName: string;
@@ -110,7 +118,6 @@ type ImagePreviewDialog = {
 
 const emptyDraft: WorkflowDraft = {
   name: "",
-  label: "",
   description: "",
   mode: "manual-confirm",
   nodes: [],
@@ -280,6 +287,7 @@ type RouteSnapshot = {
   selectedRunId: string;
   selectedWorkflowName: string;
   selectedNodeName: string;
+  nodeValidationRunId: string;
 };
 
 function decodeRouteSegment(segment: string) {
@@ -296,6 +304,7 @@ function readRouteFromHash(): RouteSnapshot {
     selectedRunId: "",
     selectedWorkflowName: "",
     selectedNodeName: "",
+    nodeValidationRunId: "",
   };
   let raw = window.location.hash.replace(/^#/, "").trim();
   if (!raw || raw === "/") return fallback;
@@ -306,21 +315,22 @@ function readRouteFromHash(): RouteSnapshot {
   const root = parts[0];
   if (root === "runs") {
     const runId = parts[1] ? decodeRouteSegment(parts[1]) : "";
-    return { page: "runs", selectedRunId: runId, selectedWorkflowName: "", selectedNodeName: "" };
+    return { page: "runs", selectedRunId: runId, selectedWorkflowName: "", selectedNodeName: "", nodeValidationRunId: "" };
   }
   if (root === "workflows") {
     const workflowName = parts[1] ? decodeRouteSegment(parts[1]) : "";
-    return { page: "workflows", selectedRunId: "", selectedWorkflowName: workflowName, selectedNodeName: "" };
+    return { page: "workflows", selectedRunId: "", selectedWorkflowName: workflowName, selectedNodeName: "", nodeValidationRunId: "" };
   }
   if (root === "nodes") {
     const nodeName = parts[1] ? decodeRouteSegment(parts[1]) : "";
-    return { page: "nodes", selectedRunId: "", selectedWorkflowName: "", selectedNodeName: nodeName };
+    const validationRunId = parts[2] === "validate" && parts[3] ? decodeRouteSegment(parts[3]) : "";
+    return { page: "nodes", selectedRunId: "", selectedWorkflowName: "", selectedNodeName: nodeName, nodeValidationRunId: validationRunId };
   }
   return fallback;
 }
 
 function buildHashFromRoute(route: RouteSnapshot) {
-  const { page, selectedRunId, selectedWorkflowName, selectedNodeName } = route;
+  const { page, selectedRunId, selectedWorkflowName, selectedNodeName, nodeValidationRunId } = route;
   if (page === "runs") {
     return selectedRunId ? `#/runs/${encodeURIComponent(selectedRunId)}` : "#/runs";
   }
@@ -328,6 +338,9 @@ function buildHashFromRoute(route: RouteSnapshot) {
     return selectedWorkflowName ? `#/workflows/${encodeURIComponent(selectedWorkflowName)}` : "#/workflows";
   }
   if (page === "nodes") {
+    if (selectedNodeName && nodeValidationRunId) {
+      return `#/nodes/${encodeURIComponent(selectedNodeName)}/validate/${encodeURIComponent(nodeValidationRunId)}`;
+    }
     return selectedNodeName ? `#/nodes/${encodeURIComponent(selectedNodeName)}` : "#/nodes";
   }
   return "#/runs";
@@ -344,6 +357,8 @@ function App() {
   const [selectedRun, setSelectedRun] = useState<Run | null>(null);
   const [selectedWorkflowName, setSelectedWorkflowName] = useState<string>(initialRoute.selectedWorkflowName);
   const [selectedNodeName, setSelectedNodeName] = useState<string>(initialRoute.selectedNodeName);
+  const [nodeValidationRunId, setNodeValidationRunId] = useState<string>(initialRoute.nodeValidationRunId);
+  const [nodeValidationRun, setNodeValidationRun] = useState<Run | null>(null);
   const [selectedNode, setSelectedNode] = useState<NodeDefinition | null>(null);
   const [draft, setDraft] = useState<WorkflowDraft>(emptyDraft);
   const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = useState(false);
@@ -362,7 +377,8 @@ function App() {
     const query = nodeSearch.trim().toLowerCase();
     if (!query) return nodes;
     return nodes.filter((node) => {
-      const haystack = `${node.name} ${node.label ?? ""} ${node.description ?? ""}`.toLowerCase();
+      const tagText = (node.tags ?? []).join(" ");
+      const haystack = `${node.name} ${node.label ?? ""} ${node.description ?? ""} ${tagText}`.toLowerCase();
       return haystack.includes(query);
     });
   }, [nodeSearch, nodes]);
@@ -374,7 +390,8 @@ function App() {
       const capabilityText = Object.entries(node.capabilities ?? {})
         .map(([key, value]) => `${key}:${value}`)
         .join(" ");
-      const haystack = `${node.name} ${node.label ?? ""} ${node.description ?? ""} ${node.command ?? ""} ${capabilityText}`.toLowerCase();
+      const tagText = (node.tags ?? []).join(" ");
+      const haystack = `${node.name} ${node.label ?? ""} ${node.description ?? ""} ${node.command ?? ""} ${capabilityText} ${tagText}`.toLowerCase();
       return haystack.includes(query);
     });
   }, [nodeRegistrySearch, nodes]);
@@ -408,6 +425,15 @@ function App() {
     setSelectedRun(run);
   }
 
+  async function refreshNodeValidation(runId = nodeValidationRunId) {
+    if (!runId) {
+      setNodeValidationRun(null);
+      return;
+    }
+    const run = await api<Run>(`/api/runs/${runId}`);
+    setNodeValidationRun(run);
+  }
+
   const pushToast = useCallback((variant: ToastItem["variant"], message: string) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     setToasts((prev) => [...prev.slice(-(TOAST_MAX - 1)), { id, variant, message }]);
@@ -439,11 +465,12 @@ function App() {
       selectedRunId,
       selectedWorkflowName,
       selectedNodeName,
+      nodeValidationRunId,
     });
     if (window.location.hash !== next) {
       window.location.hash = next;
     }
-  }, [page, selectedRunId, selectedWorkflowName, selectedNodeName]);
+  }, [page, selectedRunId, selectedWorkflowName, selectedNodeName, nodeValidationRunId]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -452,8 +479,10 @@ function App() {
       setSelectedRunId(route.selectedRunId);
       setSelectedWorkflowName(route.selectedWorkflowName);
       setSelectedNodeName(route.selectedNodeName);
+      setNodeValidationRunId(route.nodeValidationRunId);
       setSelectedRun(null);
       setSelectedNode(null);
+      setNodeValidationRun(null);
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -490,6 +519,32 @@ function App() {
     return () => window.clearInterval(timer);
   }, [selectedRunId]);
 
+  useEffect(() => {
+    if (!nodeValidationRunId) {
+      setNodeValidationRun(null);
+      return;
+    }
+    let cancelled = false;
+
+    async function loadValidationRun() {
+      try {
+        const run = await api<Run>(`/api/runs/${nodeValidationRunId}`);
+        if (!cancelled) setNodeValidationRun(run);
+      } catch (err) {
+        if (!cancelled) pushToast("error", err instanceof Error ? err.message : "立即运行记录读取失败");
+      }
+    }
+
+    void loadValidationRun();
+    const timer = window.setInterval(() => {
+      void loadValidationRun();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [nodeValidationRunId, pushToast]);
+
   async function startWorkflow(name: string) {
     await withErrorBoundary(async () => {
       const created = await api<{ runId: string }>(`/api/workflows/${name}/runs`, {
@@ -502,35 +557,59 @@ function App() {
     }, "已创建运行记录");
   }
 
+  async function startNodeValidation(name: string) {
+    await withErrorBoundary(async () => {
+      const created = await api<{ runId: string; run: Run }>(`/api/nodes/${name}/validations`, {
+        method: "POST",
+      });
+      setSelectedNodeName(name);
+      setNodeValidationRunId(created.runId);
+      setNodeValidationRun(created.run);
+      setPage("nodes");
+    }, "已开始立即运行");
+  }
+
   function viewWorkflow(name: string) {
     setSelectedWorkflowName(name);
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     setPage("workflows");
   }
 
   function viewWorkflowList() {
     setSelectedWorkflowName("");
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     setPage("workflows");
   }
 
   function viewNode(name: string) {
     setSelectedNodeName(name);
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     setPage("nodes");
   }
 
   function viewNodeList() {
     setSelectedNodeName("");
     setSelectedNode(null);
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     setPage("nodes");
   }
 
   function viewRun(runId: string) {
     setSelectedRunId(runId);
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     void refreshRun(runId);
   }
 
   function viewRunList() {
     setSelectedRunId("");
     setSelectedRun(null);
+    setNodeValidationRunId("");
+    setNodeValidationRun(null);
     setPage("runs");
   }
 
@@ -586,7 +665,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           ...draft,
-          name: slugify(draft.name),
+          name: draft.name.trim(),
           nodes: draft.nodes.map((node, index) => ({
             ...node,
             depends_on: index > 0 ? [draft.nodes[index - 1].id] : [],
@@ -648,6 +727,22 @@ function App() {
       await api(`/api/runs/${selectedRun.id}/nodes/${nodeId}/stop`, { method: "POST" });
       await refreshRun(selectedRun.id);
       await refreshLists();
+    }, "节点已停止");
+  }
+
+  async function retryValidationNode(nodeId: string) {
+    if (!nodeValidationRun) return;
+    await withErrorBoundary(async () => {
+      await api(`/api/runs/${nodeValidationRun.id}/nodes/${nodeId}/retry`, { method: "POST" });
+      await refreshNodeValidation(nodeValidationRun.id);
+    }, "节点已重新运行");
+  }
+
+  async function stopValidationNode(nodeId: string) {
+    if (!nodeValidationRun) return;
+    await withErrorBoundary(async () => {
+      await api(`/api/runs/${nodeValidationRun.id}/nodes/${nodeId}/stop`, { method: "POST" });
+      await refreshNodeValidation(nodeValidationRun.id);
     }, "节点已停止");
   }
 
@@ -785,16 +880,29 @@ function App() {
         )}
 
         {page === "nodes" && (
-          <NodeManagementView
-            busy={busy}
-            filteredNodes={filteredRegistryNodes}
-            nodeSearch={nodeRegistrySearch}
-            nodes={nodes}
-            selectedNode={selectedNode}
-            onSetNodeSearch={setNodeRegistrySearch}
-            onViewNode={viewNode}
-            onViewNodeList={viewNodeList}
-          />
+          nodeValidationRunId ? (
+            <NodeValidationView
+              busy={busy}
+              node={selectedNode}
+              run={nodeValidationRun}
+              onBack={viewNodeList}
+              onRefreshRun={() => refreshNodeValidation(nodeValidationRunId)}
+              onRetryNode={retryValidationNode}
+              onStopNode={stopValidationNode}
+            />
+          ) : (
+            <NodeManagementView
+              busy={busy}
+              filteredNodes={filteredRegistryNodes}
+              nodeSearch={nodeRegistrySearch}
+              nodes={nodes}
+              selectedNode={selectedNode}
+              onSetNodeSearch={setNodeRegistrySearch}
+              onStartValidation={startNodeValidation}
+              onViewNode={viewNode}
+              onViewNodeList={viewNodeList}
+            />
+          )
         )}
       </section>
 
@@ -810,12 +918,17 @@ type NodeManagementProps = {
   nodes: NodeDefinition[];
   selectedNode: NodeDefinition | null;
   onSetNodeSearch: (value: string) => void;
+  onStartValidation: (name: string) => void;
   onViewNode: (name: string) => void;
   onViewNodeList: () => void;
 };
 
 function capabilityEntries(node: NodeDefinition) {
   return Object.entries(node.capabilities ?? {});
+}
+
+function isNodeImplemented(node: NodeDefinition) {
+  return node.capabilities?.implemented !== false;
 }
 
 function CapabilitySwitchRow({ name, enabled, compact }: { name: string; enabled: boolean; compact?: boolean }) {
@@ -837,9 +950,12 @@ function CapabilitySwitchRow({ name, enabled, compact }: { name: string; enabled
   );
 }
 
-function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNode, onSetNodeSearch, onViewNode, onViewNodeList }: NodeManagementProps) {
+function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNode, onSetNodeSearch, onStartValidation, onViewNode, onViewNodeList }: NodeManagementProps) {
+  const [detailNode, setDetailNode] = useState<NodeDefinition | null>(null);
+
   if (selectedNode) {
     const capabilities = capabilityEntries(selectedNode);
+    const implemented = isNodeImplemented(selectedNode);
     return (
       <section className="node-detail-page">
         <div className="section-header">
@@ -847,8 +963,14 @@ function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNo
             <p className="eyebrow">Node Detail</p>
             <h2>{selectedNode.label ?? selectedNode.name}</h2>
             <p className="muted">{selectedNode.name}</p>
+            {Boolean(selectedNode.tags?.length) && (
+              <div className="node-tags">
+                {selectedNode.tags!.map((tag) => <span key={tag}>{tag}</span>)}
+              </div>
+            )}
           </div>
           <div className="actions">
+            <button className="primary-button" onClick={() => onStartValidation(selectedNode.name)} disabled={busy || !implemented}>立即运行</button>
             <button className="secondary-button" onClick={onViewNodeList} disabled={busy}>返回节点列表</button>
           </div>
         </div>
@@ -900,6 +1022,8 @@ function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNo
     );
   }
 
+  const detailCapabilities = detailNode ? capabilityEntries(detailNode) : [];
+
   return (
     <div className="page-stack">
       <section className="management-list">
@@ -911,38 +1035,506 @@ function NodeManagementView({ busy, filteredNodes, nodeSearch, nodes, selectedNo
           <span className="count-pill">{filteredNodes.length}/{nodes.length} 个</span>
         </div>
         <input value={nodeSearch} onChange={(event) => onSetNodeSearch(event.target.value)} placeholder="按名称、展示名、描述、命令或能力查询节点" />
-        <div className="node-table">
+        <div className="node-registry-grid">
           {filteredNodes.length === 0 && <p className="muted">没有匹配的节点。</p>}
           {filteredNodes.map((node) => {
-            const capabilities = capabilityEntries(node);
+            const implemented = isNodeImplemented(node);
             return (
-              <article className="node-row" key={node.name}>
-                <div>
+              <article className={`node-registry-card${implemented ? "" : " node-registry-card--pending"}`} key={node.name}>
+                <div className="node-registry-card-body">
                   <h3>{node.label ?? node.name}</h3>
                   <p className="muted">{node.name}</p>
-                  {node.description && <p>{node.description}</p>}
-                  <div className="workflow-meta">
-                    {node.command && <span>{node.command}</span>}
-                    {node.ui?.entry && <span>UI: {node.ui.entry}</span>}
-                    {node.path && <span>{node.path}</span>}
-                  </div>
-                  {capabilities.length > 0 && (
-                    <div className="capability-list compact-list capability-list--switches">
-                      {capabilities.map(([name, enabled]) => (
-                        <CapabilitySwitchRow key={name} name={name} enabled={Boolean(enabled)} compact />
-                      ))}
+                  {Boolean(node.tags?.length) && (
+                    <div className="node-tags">
+                      {node.tags!.map((tag) => <span key={tag}>{tag}</span>)}
                     </div>
                   )}
+                  {node.description && <p>{node.description}</p>}
                 </div>
-                <div className="workflow-row-actions">
-                  <button onClick={() => onViewNode(node.name)} disabled={busy}>查看定义</button>
+                <div className="node-registry-card-actions">
+                  <button
+                    className="primary-button"
+                    onClick={() => onStartValidation(node.name)}
+                    disabled={busy || !implemented}
+                    title={implemented ? undefined : "节点待实现"}
+                  >
+                    立即运行
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => setDetailNode(node)}
+                    disabled={busy || !implemented}
+                    title={implemented ? undefined : "节点待实现"}
+                  >
+                    查看详情
+                  </button>
                 </div>
               </article>
             );
           })}
         </div>
       </section>
+
+      {detailNode && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setDetailNode(null)}>
+          <section className="modal-dialog node-registry-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="node-registry-detail-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Node Detail</p>
+                <h2 id="node-registry-detail-title">{detailNode.label ?? detailNode.name}</h2>
+                <p className="muted">{detailNode.name}</p>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setDetailNode(null)} aria-label="关闭详情">×</button>
+            </div>
+            <div className="modal-body node-registry-detail-body">
+              {detailNode.description && (
+                <section className="node-registry-detail-section node-registry-detail-section--full">
+                  <h3>说明</h3>
+                  <p>{detailNode.description}</p>
+                </section>
+              )}
+
+              <section className="node-registry-detail-section">
+                <h3>运行入口</h3>
+                <div className="definition-fields">
+                  <div>
+                    <span>命令</span>
+                    <strong>{detailNode.command ?? "未配置"}</strong>
+                  </div>
+                  <div>
+                    <span>UI 入口</span>
+                    <strong>{detailNode.ui?.entry ?? "未配置"}</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="node-registry-detail-section">
+                <h3>文件位置</h3>
+                <div className="definition-fields">
+                  <div>
+                    <span>节点目录</span>
+                    <strong>{detailNode.path ?? "未配置"}</strong>
+                  </div>
+                  <div>
+                    <span>定义文件</span>
+                    <strong>{detailNode.definitionPath ?? "未配置"}</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="node-registry-detail-section node-registry-detail-section--full">
+                <div className="section-header compact">
+                  <h3>能力配置</h3>
+                  <span>{detailCapabilities.length} 项</span>
+                </div>
+                <div className="capability-list capability-list--switches">
+                  {detailCapabilities.length === 0 && <p className="muted">未声明能力。</p>}
+                  {detailCapabilities.map(([name, enabled]) => (
+                    <CapabilitySwitchRow key={name} name={name} enabled={Boolean(enabled)} />
+                  ))}
+                </div>
+              </section>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => {
+                const nodeName = detailNode.name;
+                setDetailNode(null);
+                onViewNode(nodeName);
+              }} disabled={busy}>查看定义</button>
+              <button className="primary-button" onClick={() => {
+                const nodeName = detailNode.name;
+                setDetailNode(null);
+                onStartValidation(nodeName);
+              }} disabled={busy || !isNodeImplemented(detailNode)}>立即运行</button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
+  );
+}
+
+type NodeValidationProps = {
+  busy: boolean;
+  node: NodeDefinition | null;
+  run: Run | null;
+  onBack: () => void;
+  onRefreshRun: () => Promise<void> | void;
+  onRetryNode: (nodeId: string) => void;
+  onStopNode: (nodeId: string) => void;
+};
+
+function formatJson(value: unknown) {
+  if (value === undefined || value === null) return "";
+  return JSON.stringify(value, null, 2);
+}
+
+function appendLogText(current: string, addition: string) {
+  const next = addition.trim();
+  if (!next) return current;
+  return current ? `${current}\n${next}` : next;
+}
+
+function NodeValidationView({ busy, node, run, onBack, onRefreshRun, onRetryNode, onStopNode }: NodeValidationProps) {
+  const validationNode = run?.workflow.nodes[0];
+  const nodeId = validationNode?.id ?? node?.name ?? "";
+  const nodeStatus = nodeId ? run?.nodeStatuses?.[nodeId] : undefined;
+  const [logs, setLogs] = useState<NodeLogs>({ stdout: "", stderr: "", combined: "", stdoutOffset: 0, stderrOffset: 0 });
+  const [logError, setLogError] = useState("");
+  const [progress, setProgress] = useState<NodeProgress | null>(null);
+  const [progressError, setProgressError] = useState("");
+  const [inputText, setInputText] = useState("");
+  const [inputError, setInputError] = useState("");
+  const [inputNotice, setInputNotice] = useState("");
+  const [defaultParamsNotice, setDefaultParamsNotice] = useState("");
+  const [defaultParamsError, setDefaultParamsError] = useState("");
+  const [result, setResult] = useState<unknown>(null);
+  const [preview, setPreview] = useState<DataPreview | null>(null);
+  const [outputError, setOutputError] = useState("");
+  const [imagePreviewDialog, setImagePreviewDialog] = useState<ImagePreviewDialog>(null);
+  const [nodeUiDialogOpen, setNodeUiDialogOpen] = useState(false);
+  const nodeUiFrameRef = useRef<HTMLIFrameElement | null>(null);
+
+  const status = progress?.status ?? nodeStatus?.status ?? "pending";
+  const progressValue = Math.max(0, Math.min(100, Math.round(Number(progress?.progress ?? nodeStatus?.progress ?? 0))));
+  const canStop = ["running", "stopping"].includes(status);
+  const canRetry = ["failed", "stopped"].includes(status);
+  const uiVersion = [nodeId, status, nodeStatus?.startedAt, nodeStatus?.endedAt].filter(Boolean).join(":");
+  const logText = logs.combined || "暂无运行日志。";
+  const validationInputExample = formatJson(node?.validationInputExample);
+  const acceptsValidationInput = node?.validationInputExample !== undefined;
+  const canSaveDefaultParams = Boolean(node?.capabilities?.params && run && nodeId);
+
+  async function loadOutput() {
+    if (!run || !nodeId) return;
+    try {
+      const [nextResult, nextPreview] = await Promise.all([
+        api<unknown>(`/api/runs/${run.id}/nodes/${nodeId}/result`),
+        api<DataPreview>(`/api/runs/${run.id}/nodes/${nodeId}/data-preview`),
+      ]);
+      setResult(nextResult);
+      setPreview(nextPreview);
+      setOutputError("");
+    } catch (err) {
+      setOutputError(err instanceof Error ? err.message : "输出读取失败");
+    }
+  }
+
+  async function saveInput() {
+    if (!run) return;
+    setInputError("");
+    setInputNotice("");
+    let payload: unknown;
+    try {
+      payload = inputText.trim() ? JSON.parse(inputText) : [];
+    } catch (err) {
+      setInputError(err instanceof Error ? err.message : "JSON 格式无效");
+      return;
+    }
+    try {
+      await api(`/api/runs/${run.id}/validation-input`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      setInputNotice("测试输入已保存为虚拟上游输出。");
+      await onRefreshRun();
+    } catch (err) {
+      setInputError(err instanceof Error ? err.message : "保存测试输入失败");
+    }
+  }
+
+  async function saveCurrentParamsAsDefault() {
+    if (!run || !nodeId) return;
+    setDefaultParamsError("");
+    setDefaultParamsNotice("");
+    try {
+      const params = await requestCurrentNodeParams();
+      if (params && typeof params === "object" && "__vcawError" in params) {
+        throw new Error(String((params as { __vcawError: unknown }).__vcawError));
+      }
+      await api(`/api/runs/${run.id}/nodes/${nodeId}/default-params`, {
+        method: "PUT",
+        body: JSON.stringify(params ?? {}),
+      });
+      setDefaultParamsNotice("当前参数已保存为节点默认值。");
+      await onRefreshRun();
+    } catch (err) {
+      setDefaultParamsError(err instanceof Error ? err.message : "保存默认值失败");
+    }
+  }
+
+  async function requestCurrentNodeParams(): Promise<unknown | null> {
+    const target = nodeUiFrameRef.current?.contentWindow;
+    if (!target) return null;
+    const requestId = `params-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        resolve(null);
+      }, 800);
+      function onMessage(event: MessageEvent) {
+        if (event.origin !== API_ORIGIN) return;
+        const message = event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.type !== "vcaw:node-params" || message.requestId !== requestId) return;
+        window.clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        if (typeof message.error === "string" && message.error) {
+          resolve({ __vcawError: message.error });
+          return;
+        }
+        resolve(message.params ?? null);
+      }
+      window.addEventListener("message", onMessage);
+      target.postMessage({ type: "vcaw:get-node-params", requestId }, API_ORIGIN);
+    });
+  }
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== API_ORIGIN) return;
+      const message = event.data;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "vcaw:node-ui-dialog") {
+        setNodeUiDialogOpen(Boolean(message.open));
+        return;
+      }
+      if (message.type !== "vcaw:image-preview") return;
+      if (typeof message.imageUrl !== "string" || !message.imageUrl.trim()) return;
+      setImagePreviewDialog({ imageUrl: message.imageUrl });
+      if (event.source) {
+        (event.source as Window).postMessage(
+          { type: "vcaw:image-preview:handled", requestId: message.requestId },
+          event.origin,
+        );
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    setNodeUiDialogOpen(false);
+  }, [run?.id, nodeId]);
+
+  useEffect(() => {
+    if (!run) {
+      setInputText("");
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await api<ValidationInput>(`/api/runs/${run.id}/validation-input`);
+        if (!cancelled) setInputText(formatJson(data.input) || validationInputExample);
+      } catch {
+        if (!cancelled) setInputText(validationInputExample);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [run?.id, validationInputExample]);
+
+  useEffect(() => {
+    if (!run || !nodeId) {
+      setLogs({ stdout: "", stderr: "", combined: "", stdoutOffset: 0, stderrOffset: 0 });
+      return;
+    }
+    let cancelled = false;
+    let stdoutOffset = 0;
+    let stderrOffset = 0;
+    setLogs({ stdout: "", stderr: "", combined: "", stdoutOffset: 0, stderrOffset: 0 });
+
+    async function loadLogs() {
+      try {
+        const query = stdoutOffset > 0 || stderrOffset > 0
+          ? `?stdoutOffset=${stdoutOffset}&stderrOffset=${stderrOffset}`
+          : "";
+        const nextLogs = await api<NodeLogs>(`/api/runs/${run!.id}/nodes/${nodeId}/logs${query}`);
+        if (!cancelled) {
+          setLogs((prev) => {
+            const stdoutReset = nextLogs.stdoutOffset < stdoutOffset;
+            const stderrReset = nextLogs.stderrOffset < stderrOffset;
+            const stdout = stdoutReset ? nextLogs.stdout : prev.stdout + nextLogs.stdout;
+            const stderr = stderrReset ? nextLogs.stderr : prev.stderr + nextLogs.stderr;
+            const combined = stdoutReset || stderrReset ? nextLogs.combined.trim() : appendLogText(prev.combined, nextLogs.combined);
+            return {
+              stdout,
+              stderr,
+              combined,
+              stdoutOffset: nextLogs.stdoutOffset,
+              stderrOffset: nextLogs.stderrOffset,
+            };
+          });
+          stdoutOffset = nextLogs.stdoutOffset;
+          stderrOffset = nextLogs.stderrOffset;
+          setLogError("");
+        }
+      } catch (err) {
+        if (!cancelled) setLogError(err instanceof Error ? err.message : "日志读取失败");
+      }
+    }
+
+    void loadLogs();
+    const timer = window.setInterval(loadLogs, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [run?.id, nodeId]);
+
+  useEffect(() => {
+    if (!run || !nodeId) {
+      setProgress(null);
+      setProgressError("");
+      return;
+    }
+    let cancelled = false;
+
+    async function loadProgress() {
+      try {
+        const nextProgress = await api<NodeProgress>(`/api/runs/${run!.id}/nodes/${nodeId}/progress`);
+        if (!cancelled) {
+          setProgress(nextProgress);
+          setProgressError("");
+        }
+      } catch (err) {
+        if (!cancelled) setProgressError(err instanceof Error ? err.message : "进度读取失败");
+      }
+    }
+
+    void loadProgress();
+    const timer = window.setInterval(loadProgress, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [run?.id, nodeId]);
+
+  useEffect(() => {
+    void loadOutput();
+  }, [run?.id, nodeId, nodeStatus?.endedAt, nodeStatus?.status]);
+
+  if (!run || !validationNode) {
+    return (
+      <section className="node-detail-page">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Run Node</p>
+            <h2>{node?.label ?? node?.name ?? "节点立即运行"}</h2>
+            <p className="muted">正在加载验证会话...</p>
+          </div>
+          <div className="actions">
+            <button className="secondary-button" onClick={onBack} disabled={busy}>返回节点列表</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className={`node-validation-page${nodeUiDialogOpen ? " node-validation-page--expanded-ui" : ""}`}>
+      <ImagePreviewModal dialog={imagePreviewDialog} onClose={() => setImagePreviewDialog(null)} />
+      <div className="section-header">
+        <div>
+          <p className="eyebrow">Run Node</p>
+          <h2>{node?.label ?? validationNode.node}</h2>
+          <p className="muted">{run.id}</p>
+        </div>
+        <div className="actions">
+          <button className="secondary-button" onClick={onBack} disabled={busy}>返回节点列表</button>
+          <button onClick={() => void loadOutput()} disabled={busy}>刷新输出</button>
+          {canSaveDefaultParams && <button onClick={() => void saveCurrentParamsAsDefault()} disabled={busy}>保存当前参数为默认值</button>}
+          {canStop && <button className="danger-button" onClick={() => onStopNode(nodeId)} disabled={busy}>停止节点</button>}
+          {canRetry && <button className="primary-button" onClick={() => onRetryNode(nodeId)} disabled={busy}>重新运行</button>}
+        </div>
+      </div>
+
+      {defaultParamsError && <p className="error-text">{defaultParamsError}</p>}
+      {defaultParamsNotice && <p className="success-text">{defaultParamsNotice}</p>}
+
+      <div className="run-detail-meta">
+        <span>单节点运行</span>
+        <span>{validationNode.node}</span>
+        <span>{nodeStatusLabel(status)}</span>
+      </div>
+
+      <div className={acceptsValidationInput ? "node-validation-grid" : "node-validation-grid no-validation-input"}>
+        {acceptsValidationInput && (
+          <section className="validation-side-panel">
+            <div className="section-header compact">
+              <h3>测试输入</h3>
+            </div>
+            <p className="muted">用于模拟上游节点输出，节点会从 validation-input 读取这份 data.json。</p>
+            <textarea
+              className="json-editor"
+              value={inputText}
+              onChange={(event) => setInputText(event.target.value)}
+              placeholder={validationInputExample || '[{"id":"case-1","value":"demo"}]'}
+            />
+            {inputError && <p className="error-text">{inputError}</p>}
+            {inputNotice && <p className="success-text">{inputNotice}</p>}
+            <button className="primary-button" onClick={saveInput} disabled={busy}>保存测试输入</button>
+          </section>
+        )}
+
+        <section className="run-node-panel validation-node-panel">
+          <div className="node-panel-header">
+            <div>
+              <h3>{validationNode.id}</h3>
+              <p className="muted">{validationNode.node}</p>
+              <div className="node-progress" aria-label={`节点进度 ${progressValue}%`}>
+                <div className="node-progress-meta">
+                  <span>{nodeStatusLabel(status)}</span>
+                  <strong>{progressValue}%</strong>
+                </div>
+                <div className="node-progress-track" aria-hidden>
+                  <span style={{ width: `${progressValue}%` }} />
+                </div>
+                {progressError && <p className="error-text">{progressError}</p>}
+              </div>
+            </div>
+          </div>
+
+          <div className="node-runtime-stack">
+            {nodeStatus?.hasUi && (
+              <iframe
+                ref={nodeUiFrameRef}
+                key={uiVersion}
+                className="node-ui-frame"
+                title={`${validationNode.id} UI`}
+                src={`${API_BASE}${nodeStatus.uiUrl}?v=${encodeURIComponent(uiVersion)}`}
+              />
+            )}
+            <div className="node-console-wrap">
+              <div className="console-title">运行日志</div>
+              {logError && <p className="error-text">{logError}</p>}
+              <pre className="node-console">{logText}</pre>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section className="validation-output-panel">
+        <div className="section-header compact">
+          <h3>输出查看</h3>
+          {preview && <span>{preview.total} 条</span>}
+        </div>
+        {outputError && <p className="error-text">{outputError}</p>}
+        <div className="validation-output-grid">
+          <div>
+            <div className="console-title">result.json</div>
+            <pre className="data-preview-json">{formatJson(result) || "暂无结果。"}</pre>
+          </div>
+          <div>
+            <div className="console-title">data-preview</div>
+            <pre className="data-preview-json">{formatJson(preview) || "暂无输出数据。"}</pre>
+          </div>
+        </div>
+      </section>
+    </section>
   );
 }
 
@@ -1086,18 +1678,28 @@ function WorkflowManagementView({
               <div className="form-grid">
                 <label>
                   名称
-                  <input value={draft.name} onChange={(event) => onSetDraft({ ...draft, name: slugify(event.target.value) })} placeholder="customer-data-workflow" />
-                </label>
-                <label>
-                  展示名
-                  <input value={draft.label} onChange={(event) => onSetDraft({ ...draft, label: event.target.value })} placeholder="客户数据处理流程" />
+                  <input value={draft.name} onChange={(event) => onSetDraft({ ...draft, name: event.target.value })} placeholder="客户数据处理流程" />
                 </label>
                 <label>
                   模式
-                  <select value={draft.mode} onChange={(event) => onSetDraft({ ...draft, mode: event.target.value as WorkflowMode })}>
-                    <option value="manual-confirm">manual-confirm</option>
-                    <option value="auto">auto</option>
-                  </select>
+                  <span className="mode-switch" role="group" aria-label="工作流模式">
+                    <button
+                      type="button"
+                      className={draft.mode === "manual-confirm" ? "active" : ""}
+                      onClick={() => onSetDraft({ ...draft, mode: "manual-confirm" })}
+                      disabled={busy}
+                    >
+                      手动确认
+                    </button>
+                    <button
+                      type="button"
+                      className={draft.mode === "auto" ? "active" : ""}
+                      onClick={() => onSetDraft({ ...draft, mode: "auto" })}
+                      disabled={busy}
+                    >
+                      自动运行
+                    </button>
+                  </span>
                 </label>
                 <label className="span-2">
                   描述
@@ -1117,6 +1719,11 @@ function WorkflowManagementView({
                       <button className="available-node" key={node.name} onClick={() => onAddDraftNode(node)} disabled={busy}>
                         <strong>{node.label ?? node.name}</strong>
                         <span>{node.name}</span>
+                        {Boolean(node.tags?.length) && (
+                          <span className="node-tags compact-tags">
+                            {node.tags!.map((tag) => <em key={tag}>{tag}</em>)}
+                          </span>
+                        )}
                         {node.description && <small>{node.description}</small>}
                       </button>
                     ))}
@@ -1150,7 +1757,7 @@ function WorkflowManagementView({
 
             <div className="modal-footer">
               <button className="secondary-button" onClick={onCloseCreateWorkflow} disabled={busy}>取消</button>
-              <button className="primary-button" onClick={onCreateWorkflow} disabled={busy || !draft.name || draft.nodes.length === 0}>保存 workflow</button>
+              <button className="primary-button" onClick={onCreateWorkflow} disabled={busy || !draft.name.trim() || draft.nodes.length === 0}>保存 workflow</button>
             </div>
           </section>
         </div>
@@ -1408,10 +2015,11 @@ function RunConsoleView({
             const stderrReset = logs.stderrOffset < stderrOffset;
             const stdout = stdoutReset ? logs.stdout : prev.stdout + logs.stdout;
             const stderr = stderrReset ? logs.stderr : prev.stderr + logs.stderr;
+            const combined = stdoutReset || stderrReset ? logs.combined.trim() : appendLogText(prev.combined, logs.combined);
             return {
               stdout,
               stderr,
-              combined: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"),
+              combined,
               stdoutOffset: logs.stdoutOffset,
               stderrOffset: logs.stderrOffset,
             };

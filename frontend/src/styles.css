@@ -20,7 +20,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -52,7 +53,8 @@ button:hover:not(:disabled) {
 
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid rgb(37 99 235 / 20%);
   outline-offset: 2px;
   border-color: #2563eb;
@@ -63,6 +65,18 @@ button:disabled {
   opacity: 0.52;
   transform: none;
   box-shadow: none;
+}
+
+.icon-button {
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  min-height: 38px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
 }
 
 a {
@@ -225,7 +239,8 @@ a {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 42px;
   border: 1px solid #cbd5e1;
@@ -237,6 +252,10 @@ select {
 }
 
 input::placeholder {
+  color: #98a2b3;
+}
+
+textarea::placeholder {
   color: #98a2b3;
 }
 
@@ -309,6 +328,42 @@ label {
 
 .span-2 {
   grid-column: span 2;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  width: 100%;
+  min-height: 42px;
+  padding: 3px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #eef2f7;
+}
+
+.mode-switch button {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-color: transparent;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: #667085;
+  white-space: nowrap;
+}
+
+.mode-switch button:hover:not(:disabled) {
+  border-color: transparent;
+  background: #f8fafc;
+  box-shadow: none;
+  transform: none;
+}
+
+.mode-switch button.active {
+  background: #ffffff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 12%);
 }
 
 .builder-grid {
@@ -514,15 +569,13 @@ label {
 }
 
 .run-table,
-.workflow-table,
-.node-table {
+.workflow-table {
   display: grid;
   gap: 12px;
 }
 
 .run-row,
-.workflow-row,
-.node-row {
+.workflow-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
@@ -535,10 +588,116 @@ label {
 }
 
 .run-row:hover,
-.workflow-row:hover,
-.node-row:hover {
+.workflow-row:hover {
   border-color: #cbd5e1;
   box-shadow: 0 14px 34px rgb(15 23 42 / 8%);
+}
+
+.node-registry-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.node-registry-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 16px;
+  min-height: 218px;
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  padding: 18px;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 4%);
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.node-registry-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 14px 34px rgb(15 23 42 / 8%);
+  transform: translateY(-1px);
+}
+
+.node-registry-card-body {
+  min-width: 0;
+}
+
+.node-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.node-tags span,
+.node-tags em {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #d0d8e7;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #f8fafc;
+  color: #344054;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.compact-tags {
+  margin-top: 4px;
+}
+
+.node-registry-card-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  align-self: end;
+  align-items: center;
+}
+
+.node-registry-card-actions button {
+  width: 100%;
+}
+
+.node-registry-detail-dialog {
+  width: min(760px, 100%);
+}
+
+.modal-header .muted {
+  margin: 6px 0 0;
+}
+
+.node-registry-detail-body {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.node-registry-detail-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 4%);
+}
+
+.node-registry-detail-section h3,
+.node-registry-detail-section p {
+  margin: 0;
+}
+
+.node-registry-detail-section h3 {
+  font-size: 15px;
+}
+
+.node-registry-detail-section--full {
+  grid-column: 1 / -1;
 }
 
 .definition-node-list {
@@ -581,14 +740,16 @@ label {
 
 .run-detail-page,
 .workflow-detail-page,
-.node-detail-page {
+.node-detail-page,
+.node-validation-page {
   display: grid;
   gap: 18px;
 }
 
 .run-detail-page .section-header,
 .workflow-detail-page .section-header,
-.node-detail-page .section-header {
+.node-detail-page .section-header,
+.node-validation-page .section-header {
   align-items: flex-start;
   background: #ffffff;
   border: 1px solid #e4e7ec;
@@ -599,7 +760,8 @@ label {
 
 .run-detail-page .section-header p,
 .workflow-detail-page .section-header p,
-.node-detail-page .section-header p {
+.node-detail-page .section-header p,
+.node-validation-page .section-header p {
   margin: 8px 0 0;
 }
 
@@ -824,18 +986,18 @@ label {
 
 .workflow-row h3,
 .workflow-row p,
-.node-row h3,
-.node-row p {
+.node-registry-card h3,
+.node-registry-card p {
   margin: 0;
 }
 
 .workflow-row h3,
-.node-row h3 {
+.node-registry-card h3 {
   font-size: 18px;
 }
 
 .workflow-row p + p,
-.node-row p + p {
+.node-registry-card p + p {
   margin-top: 8px;
 }
 
@@ -1170,6 +1332,80 @@ label {
   height: 280px;
 }
 
+.node-validation-page--expanded-ui .node-validation-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.node-validation-page--expanded-ui .validation-side-panel,
+.node-validation-page--expanded-ui .validation-output-panel,
+.node-validation-page--expanded-ui .node-console-wrap {
+  display: none;
+}
+
+.node-validation-page--expanded-ui .run-node-panel {
+  width: min(100%, 1680px);
+  margin: 0 auto;
+}
+
+.node-validation-page--expanded-ui .node-runtime-stack {
+  width: 100%;
+  max-width: none;
+}
+
+.node-validation-page--expanded-ui .node-runtime-stack .node-ui-frame {
+  min-height: 760px;
+  height: calc(100vh - 250px);
+}
+
+.node-validation-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.node-validation-grid.no-validation-input {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.validation-side-panel,
+.validation-output-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  padding: 18px;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 4%);
+}
+
+.validation-side-panel p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.json-editor {
+  min-height: 340px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.validation-node-panel {
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 4%);
+}
+
+.validation-output-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .node-console-wrap {
   min-width: 0;
   display: grid;
@@ -1448,6 +1684,10 @@ label {
   color: #b42318;
 }
 
+.success-text {
+  color: #067647;
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1475,11 +1715,17 @@ label {
   .content {
     padding: 24px 18px 36px;
   }
+
+  .node-registry-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 800px) {
   .form-grid,
   .builder-grid,
+  .node-validation-grid,
+  .validation-output-grid,
   .node-detail-grid,
   .definition-node,
   .draft-node,
@@ -1487,8 +1733,15 @@ label {
   .run-row,
   .run-row-main,
   .run-filters,
-  .workflow-row,
-  .node-row {
+  .workflow-row {
+    grid-template-columns: 1fr;
+  }
+
+  .node-registry-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .node-registry-detail-body {
     grid-template-columns: 1fr;
   }
 
@@ -1504,7 +1757,8 @@ label {
 
   .actions,
   .node-actions,
-  .workflow-row-actions {
+  .workflow-row-actions,
+  .node-registry-card-actions {
     justify-content: flex-start;
   }
 
